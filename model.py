@@ -13,6 +13,7 @@ import os
 import random
 import re
 
+import time
 import numpy as np
 import torch
 import torch.nn as nn
@@ -23,9 +24,28 @@ from torch.autograd import Variable
 
 import utils
 import visualize
-from nms.nms_wrapper import nms
-from roialign.roi_align.crop_and_resize import CropAndResizeFunction
+# from nms.nms_wrapper import nms
+# # from torchvision.ops import nms, roi_pool, roi_align
+# from roialign.roi_align.crop_and_resize import CropAndResizeFunction
+# from roi_align.crop_and_resize import CropAndResizeFunction
+from torchvision.ops import nms
+from torchvision.ops import roi_align
+import matplotlib.pyplot as plt
+from einops import rearrange
+import matplotlib.patches as patches
+import wandb
+from datetime import datetime as odatetime
 
+cats = ['BG','person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light','fire hydrant','stop sign','parking meter',
+        'bench','bird','cat','dog','horse','sheep','cow','elephant','bear','zebra','giraffe','backpack','umbrella','handbag','tie','suitcase','frisbee',
+        'skis','snowboard','sports ball','kite','baseball bat','baseball glove','skateboard','surfboard','tennis racket','bottle','wine glass','cup',
+        'fork','knife','spoon','bowl','banana','apple','sandwich','orange','broccoli','carrot','hot dog','pizza','donut','cake','chair','couch',
+        'potted plant','bed','dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone','microwave','oven','toaster','sink',
+        'refrigerator','book','clock','vase','scissors','teddy bear','hair drier','toothbrush']
+# import warnings
+# warnings.filterwarnings('ignore')
+def norm_image(img):
+    return (img - img.min()) / (img.max() - img.min())
 ############################################################
 # This is inspired by https://github.com/multimodallearning/pytorch-mask-rcnn
 
@@ -241,10 +261,12 @@ class FPN(nn.Module):
         c4_out = x
         x = self.C5(x)
         p5_out = self.P5_conv1(x)
-        p4_out = self.P4_conv1(c4_out) + F.upsample(p5_out, scale_factor=2)
-        p3_out = self.P3_conv1(c3_out) + F.upsample(p4_out, scale_factor=2)
-        p2_out = self.P2_conv1(c2_out) + F.upsample(p3_out, scale_factor=2)
-
+        # p4_out = self.P4_conv1(c4_out) + F.upsample(p5_out, scale_factor=2)
+        # p3_out = self.P3_conv1(c3_out) + F.upsample(p4_out, scale_factor=2)
+        # p2_out = self.P2_conv1(c2_out) + F.upsample(p3_out, scale_factor=2)
+        p4_out = self.P4_conv1(c4_out) + F.interpolate(p5_out, scale_factor=2)  # F.upsample(p5_out, scale_factor=2)
+        p3_out = self.P3_conv1(c3_out) + F.interpolate(p4_out, scale_factor=2)  # F.upsample(p4_out, scale_factor=2)
+        p2_out = self.P2_conv1(c2_out) + F.interpolate(p3_out, scale_factor=2)  # F.upsample(p3_out, scale_factor=2)
         p5_out = self.P5_conv2(p5_out)
         p4_out = self.P4_conv2(p4_out)
         p3_out = self.P3_conv2(p3_out)
@@ -272,11 +294,11 @@ def apply_box_deltas(boxes, deltas):
     # Convert to y, x, h, w
     height = boxes[:, 2] - boxes[:, 0]
     width = boxes[:, 3] - boxes[:, 1]
-    center_y = boxes[:, 0] + 0.5 * height
-    center_x = boxes[:, 1] + 0.5 * width
+    center_y = boxes[:, 0].detach() + 0.5 * height
+    center_x = boxes[:, 1].detach() + 0.5 * width
     # Apply deltas
-    center_y += deltas[:, 0] * height
-    center_x += deltas[:, 1] * width
+    center_y += deltas[:, 0].detach() * height
+    center_x += deltas[:, 1].detach() * width
     height *= torch.exp(deltas[:, 2])
     width *= torch.exp(deltas[:, 3])
     # Convert back to y1, x1, y2, x2
@@ -349,7 +371,7 @@ def proposal_generator(inputs, proposal_count, nms_threshold, anchors, config=No
     # for small objects, so we're skipping it.
 
     # Non-max suppression
-    keep = nms(torch.cat((boxes, scores.unsqueeze(1)), 1).data, nms_threshold)
+    keep = nms(boxes, scores, nms_threshold)#nms(torch.cat((boxes, scores.unsqueeze(1)), 1).data, nms_threshold)
     keep = keep[:proposal_count]
     boxes = boxes[keep, :]
 
@@ -444,7 +466,8 @@ def pyramid_roi_align(inputs, pool_size, image_shape):
         if level_boxes.is_cuda:
             ind = ind.cuda()
         feature_maps[i] = feature_maps[i].unsqueeze(0)  #CropAndResizeFunction needs batch dimension
-        pooled_features = CropAndResizeFunction(pool_size, pool_size, 0)(feature_maps[i], level_boxes, ind)
+        # pooled_features = CropAndResizeFunction(pool_size, pool_size, 0)(feature_maps[i], level_boxes, ind)
+        pooled_features = roi_align(feature_maps[i], [level_boxes], output_size=(pool_size, pool_size))
         pooled.append(pooled_features)
 
     # Pack pooled features into one tensor
@@ -547,14 +570,14 @@ def detection_target_layer(proposals, gt_class_ids, gt_boxes, gt_masks, config):
         crowd_iou_max = torch.max(crowd_overlaps, dim=1)[0]
         no_crowd_bool = crowd_iou_max < 0.001
     else:
-        no_crowd_bool =  Variable(torch.ByteTensor(proposals.size()[0]*[True]), requires_grad=False)
+        no_crowd_bool = Variable(torch.ByteTensor(proposals.size()[0]*[True]), requires_grad=False)
         if config.GPU_COUNT:
             no_crowd_bool = no_crowd_bool.cuda()
 
     # Compute overlaps matrix [proposals, gt_boxes]
     overlaps = bbox_overlaps(proposals, gt_boxes)
 
-    # Determine postive and negative ROIs
+    # Determine positive and negative ROIs
     roi_iou_max = torch.max(overlaps, dim=1)[0]
 
     # 1. Positive ROIs are those with >= 0.5 IoU with a GT box
@@ -576,7 +599,7 @@ def detection_target_layer(proposals, gt_class_ids, gt_boxes, gt_masks, config):
         positive_rois = proposals[positive_indices.data,:]
 
         # Assign positive ROIs to GT boxes.
-        positive_overlaps = overlaps[positive_indices.data,:]
+        positive_overlaps = overlaps[positive_indices.data,:] # <- iou values of prop. box et gt: (number positive count, number of gt boxes )
         roi_gt_box_assignment = torch.max(positive_overlaps, dim=1)[1]
         roi_gt_boxes = gt_boxes[roi_gt_box_assignment.data,:]
         roi_gt_class_ids = gt_class_ids[roi_gt_box_assignment.data]
@@ -608,9 +631,17 @@ def detection_target_layer(proposals, gt_class_ids, gt_boxes, gt_masks, config):
         box_ids = Variable(torch.arange(roi_masks.size()[0]), requires_grad=False).int()
         if config.GPU_COUNT:
             box_ids = box_ids.cuda()
-        masks = Variable(CropAndResizeFunction(config.MASK_SHAPE[0], config.MASK_SHAPE[1], 0)(roi_masks.unsqueeze(1), boxes, box_ids).data, requires_grad=False)
+        # ori
+        # masks = Variable(CropAndResizeFunction(config.MASK_SHAPE[0], config.MASK_SHAPE[1], 0)(roi_masks.unsqueeze(1), boxes, box_ids).data, requires_grad=False)
+        # All zero due to boxes in norm. coordinate
+        # masks = roi_align(roi_masks.unsqueeze(1).detach(), [boxes], output_size=(config.MASK_SHAPE[0], config.MASK_SHAPE[1]))
+        masks = roi_align(roi_masks.unsqueeze(1).detach(), [boxes*gt_masks.shape[-1]], output_size=(config.MASK_SHAPE[0], config.MASK_SHAPE[1]))
         masks = masks.squeeze(1)
-
+        # np.where(roi_masks[0].cpu().detach().numpy()>0)
+        # np.where(masks[0].cpu().detach().numpy()>0) TODO
+        #np.where(roi_align(roi_masks.unsqueeze(1).detach(), [boxes*1024], output_size=(1024,1024))[0].cpu().detach().numpy()>0)
+        # plt.imshow(masks[0][0].cpu().detach().numpy())
+        # plt.show()
         # Threshold mask pixels at 0.5 to have GT masks be 0 or 1 to use with
         # binary cross entropy loss.
         masks = torch.round(masks)
@@ -766,7 +797,8 @@ def refine_detections(rois, probs, deltas, window, config):
         ix_scores, order = ix_scores.sort(descending=True)
         ix_rois = ix_rois[order.data,:]
 
-        class_keep = nms(torch.cat((ix_rois, ix_scores.unsqueeze(1)), dim=1).data, config.DETECTION_NMS_THRESHOLD)
+        # class_keep = nms(torch.cat((ix_rois, ix_scores.unsqueeze(1)), dim=1).data, config.DETECTION_NMS_THRESHOLD)
+        class_keep = nms(ix_rois, ix_scores, config.DETECTION_NMS_THRESHOLD)
 
         # Map indicies
         class_keep = keep[ixs[order[class_keep].data].data]
@@ -1124,6 +1156,7 @@ def load_image_gt(dataset, config, image_id, augment=False,
     """
     # Load image and mask
     image = dataset.load_image(image_id)
+    image1=image
     mask, class_ids = dataset.load_mask(image_id)
     shape = image.shape
     image, window, scale, padding = utils.resize_image(
@@ -1131,7 +1164,21 @@ def load_image_gt(dataset, config, image_id, augment=False,
         min_dim=config.IMAGE_MIN_DIM,
         max_dim=config.IMAGE_MAX_DIM,
         padding=config.IMAGE_PADDING)
+
     mask = utils.resize_mask(mask, scale, padding)
+    # ok
+    # fig = plt.figure(figsize=(15, 7))
+    # for idx in range(mask.shape[-1] + 1):
+    #     if idx == 0:
+    #         ax = fig.add_subplot(151)
+    #         ax.imshow(image)
+    #     else:
+    #         idx -= 1
+    #         m = mask[:, :, idx]
+    #         ax = fig.add_subplot(idx // 5 + 5, 5, idx + 1)
+    #         ax.imshow(m)
+    #         ax.title.set_text(class_ids[idx])
+    # plt.show()
 
     # Random horizontal flips.
     if augment:
@@ -1143,6 +1190,25 @@ def load_image_gt(dataset, config, image_id, augment=False,
     # if the corresponding mask got cropped out.
     # bbox: [num_instances, (y1, x1, y2, x2)]
     bbox = utils.extract_bboxes(mask)
+    # ok
+    # fig = plt.figure(figsize=(15, 7))
+    # for idx in range(mask.shape[-1] + 1):
+    #     if idx == 0:
+    #         ax = fig.add_subplot(151)
+    #         ax.imshow(image)
+    #     else:
+    #         idx -= 1
+    #         m = mask[:, :, idx]
+    #         b = bbox[idx]
+    #         ax = fig.add_subplot(idx // 5 + 5, 5, idx + 1)
+    #         ax.imshow(m)
+    #         rect = patches.Rectangle((b[1], b[0]), b[3] - b[1], b[2] - b[0], linewidth=2, edgecolor='r',
+    #                                  facecolor='none')
+    #         rx, ry = rect.get_xy()
+    #         plt.text(rx, ry + 30, class_ids[idx], fontsize=13, color='r', weight='bold')
+    #         ax.add_patch(rect)
+    #         ax.title.set_text(class_ids[idx])
+    # plt.show()
 
     # Active classes
     # Different datasets have different classes, so track the
@@ -1152,7 +1218,7 @@ def load_image_gt(dataset, config, image_id, augment=False,
     active_class_ids[source_class_ids] = 1
 
     # Resize masks to smaller size to reduce memory usage
-    if use_mini_mask:
+    if use_mini_mask: # set to False, otherwise mask will be resized to 56x56 -> deforme
         mask = utils.minimize_mask(bbox, mask, config.MINI_MASK_SHAPE)
 
     # Image meta data
@@ -1270,7 +1336,7 @@ def build_rpn_targets(image_shape, anchors, gt_class_ids, gt_boxes, config):
     return rpn_match, rpn_bbox
 
 class Dataset(torch.utils.data.Dataset):
-    def __init__(self, dataset, config, augment=True):
+    def __init__(self, dataset, config, augment=False):
         """A generator that returns images and corresponding target class ids,
             bounding box deltas, and masks.
 
@@ -1321,7 +1387,6 @@ class Dataset(torch.utils.data.Dataset):
         image, image_metas, gt_class_ids, gt_boxes, gt_masks = \
             load_image_gt(self.dataset, self.config, image_id, augment=self.augment,
                           use_mini_mask=self.config.USE_MINI_MASK)
-
         # Skip images that have no instances. This can happen in cases
         # where we train on a subset of classes and the image doesn't
         # have any of the classes we care about.
@@ -1343,6 +1408,24 @@ class Dataset(torch.utils.data.Dataset):
         # Add to batch
         rpn_match = rpn_match[:, np.newaxis]
         images = mold_image(image.astype(np.float32), self.config)
+        # ok
+        # fig = plt.figure(figsize=(15, 7))
+        # for idx in range(gt_masks.shape[-1] + 1):
+        #     if idx == 0:
+        #         ax = fig.add_subplot(151)
+        #         ax.imshow(image)
+        #     else:
+        #         idx -= 1
+        #         mask = gt_masks[:, :, idx]
+        #         b = gt_boxes[idx]
+        #         ax = fig.add_subplot(idx // 5 + 5, 5, idx + 1)
+        #         ax.imshow(mask)
+        #         rect = patches.Rectangle((b[1], b[0]), b[3]-b[1], b[2]-b[0], linewidth=2, edgecolor='r', facecolor='none')
+        #         rx, ry = rect.get_xy()
+        #         plt.text(rx, ry + 30, gt_class_ids[idx], fontsize=13, color='r', weight='bold')
+        #         ax.add_patch(rect)
+        #         ax.title.set_text(gt_class_ids[idx])
+        # plt.show()
 
         # Convert
         images = torch.from_numpy(images.transpose(2, 0, 1)).float()
@@ -1396,11 +1479,11 @@ class MaskRCNN(nn.Module):
         # Bottom-up Layers
         # Returns a list of the last layers of each stage, 5 in total.
         # Don't create the thead (stage 5), so we pick the 4th item in the list.
-        resnet = ResNet("resnet101", stage5=True)
-        C1, C2, C3, C4, C5 = resnet.stages()
+        resnet = ResNet("resnet101", stage5=True) # -> TODO pre trained and res18 par example
+        C1, C2, C3, C4, C5 = resnet.stages() # C4
 
-        # FPN network
-        self.fpn = FPN(C1, C2, C3, C4, C5, out_channels=256)
+        # FPN network # no more needed
+        self.fpn = FPN(C1, C2, C3, C4, C5, out_channels=256) # -> self.fpn() -> vits()
 
         # Generate Anchors
         self.anchors = Variable(torch.from_numpy(utils.generate_pyramid_anchors(config.RPN_ANCHOR_SCALES,
@@ -1434,7 +1517,7 @@ class MaskRCNN(nn.Module):
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.xavier_uniform(m.weight)
+                nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     m.bias.data.zero_()
             elif isinstance(m, nn.BatchNorm2d):
@@ -1484,6 +1567,8 @@ class MaskRCNN(nn.Module):
         self.log_dir = os.path.join(self.model_dir, "{}{:%Y%m%dT%H%M}".format(
             self.config.NAME.lower(), now))
 
+        if not os.path.exists(self.log_dir):
+            os.makedirs(self.log_dir)
         # Path to save after each epoch. Include placeholders that get filled by Keras.
         self.checkpoint_path = os.path.join(self.log_dir, "mask_rcnn_{}_*epoch*.pth".format(
             self.config.NAME.lower()))
@@ -1618,7 +1703,7 @@ class MaskRCNN(nn.Module):
         return [images, image_metas,rpn_match,rpn_bbox,gt_class_ids,gt_boxes,gt_masks]
     
 
-    def train_model(self, train_dataset, val_dataset, learning_rate, epochs,BatchSize,steps, layers):
+    def train_model(self, train_dataset, learning_rate, epochs,BatchSize,steps, layers,dict_id2cat=None,use_wandb=False):
         """Train the model.
         train_dataset, val_dataset: Training and validation Dataset objects.
         learning_rate: The learning rate to train with
@@ -1651,8 +1736,16 @@ class MaskRCNN(nn.Module):
             layers = layer_regex[layers]
 
         # Data generators
-        train_set = Dataset(train_dataset, self.config, augment=True)
-        train_generator = torch.utils.data.DataLoader(train_set, batch_size=BatchSize,collate_fn=self.collate_custom, shuffle=True, num_workers=1)
+        train_set = Dataset(train_dataset, self.config, augment=False)
+        # train_set, val_set = torch.utils.data.random_split(train_set, [4000, len(train_set)-4000])
+        if use_wandb:
+            train_generator = torch.utils.data.DataLoader(train_set, batch_size=BatchSize,
+                                                          collate_fn=self.collate_custom, shuffle=True, num_workers=4)
+        else:
+            train_generator = torch.utils.data.DataLoader(train_set, batch_size=BatchSize,
+                                                          collate_fn=self.collate_custom, shuffle=True, num_workers=0)
+        nb_batches = int(len(train_generator))
+        print("Number of Batches:", nb_batches)
 
         # Train
         log("\nStarting at epoch {}. LR={}\n".format(self.epoch, learning_rate))
@@ -1673,25 +1766,56 @@ class MaskRCNN(nn.Module):
         # Skip gamma and beta weights of batch normalization layers.
         trainables_wo_bn = [param for name, param in self.named_parameters() if param.requires_grad and not 'bn' in name]
         trainables_only_bn = [param for name, param in self.named_parameters() if param.requires_grad and 'bn' in name]
-        optimizer = optim.SGD([
-            {'params': trainables_wo_bn, 'weight_decay': self.config.WEIGHT_DECAY},
-            {'params': trainables_only_bn}], lr=learning_rate, momentum=self.config.LEARNING_MOMENTUM)
-        
-        # Training 
+        optimizer = optim.SGD(self.parameters(), lr=learning_rate)
+        # todo
+        # Training
+        #laa
         for epoch in range(self.epoch+1, epochs+1):
             log("Epoch {}/{}.".format(epoch,epochs))
             epoch_loss = 0
             step = 0
 
+            temp_param = list(self.classifier.conv1.parameters())[0][0][0]
+            temp_param = [v for v in list(temp_param.cpu().detach().numpy())]
+
+            start_time = time.time()
             for inputs in train_generator:
                 optimizer.zero_grad()
+
+                # torch.autograd.set_detect_anomaly(True)
                 loss=0
                 images,image_metas_batch,rpn_match_batch,rpn_bbox_batch,gt_class_ids_batch,gt_boxes_batch,gt_masks_batch = inputs
+
+                # ok
+                # i = 3
+                # fig = plt.figure(figsize=(20, 10))
+                # for o in range(gt_boxes_batch[i].shape[0]):
+                #     if o == 0:
+                #         ax = fig.add_subplot(151)
+                #         ax.imshow(norm_image(rearrange(images[i], 'c b p -> b p c', c=3)))
+                #     else:
+                #         o -= 1
+                #         b = gt_boxes_batch[i][o]
+                #         m = gt_masks_batch[i][o]  # bbox array [num_instances, (y1, x1, y2, x2)]
+                #         ids = gt_class_ids_batch[i][o]
+                #         ax = fig.add_subplot(o // 5 + 5, 5, o + 1)
+                #         ax.imshow(m)
+                #         # x,y,w,h
+                #         rect = patches.Rectangle((int(b[1].numpy()), int(b[0].numpy())),
+                #                                  int(b[3].numpy()) - int(b[1].numpy()),
+                #                                  int(b[2].numpy()) - int(b[0].numpy()),
+                #                                  linewidth=4, edgecolor='r', facecolor='none')
+                #         ax.add_patch(rect)
+                #         # ax.title.set_text(f"{cats[ids]}, {b}")
+                #         ax.title.set_text(cats[ids])
+                # plt.tight_layout(pad=3)
+                # plt.show()
+
                 # from list to tensor
                 images = torch.stack(images).cuda()              
 
                 # Feature extraction
-                [p2_out, p3_out, p4_out, p5_out, p6_out] = self.fpn(images)
+                [p2_out, p3_out, p4_out, p5_out, p6_out] = self.fpn(images) # vits
 
                 # Note that P6 is used in RPN, but not in the classifier heads.
                 rpn_feature_maps = [p2_out, p3_out, p4_out, p5_out, p6_out]
@@ -1719,7 +1843,7 @@ class MaskRCNN(nn.Module):
                 proposal_count = self.config.POST_NMS_ROIS_TRAINING
 
                 # compute the losses for each batch
-                for i in range(BatchSize):
+                for i in range(BatchSize): # loop over each image in the batch
                         # from list to tensor
                         image_metas=image_metas_batch[i]
                         rpn_class_logits=rpn_class_logits_batch[i]
@@ -1775,8 +1899,10 @@ class MaskRCNN(nn.Module):
                         # padded. Equally, returned rois and targets are zero padded.
                         rois, target_class_ids, target_deltas, target_mask = \
                             detection_target_layer(rpn_rois, gt_class_ids, gt_boxes, gt_masks, self.config)
+                        # may have 27 gt_box and only 6 roi when training -> mrcnn_class later will have 6 also, depends on roi
 
                         if not rois.size()[0]:
+                            # print("1", rois.size()[0])
                             mrcnn_class_logits = Variable(torch.FloatTensor())
                             mrcnn_class = Variable(torch.IntTensor())
                             mrcnn_bbox = Variable(torch.FloatTensor())
@@ -1787,17 +1913,47 @@ class MaskRCNN(nn.Module):
                                 mrcnn_bbox = mrcnn_bbox.cuda()
                                 mrcnn_mask = mrcnn_mask.cuda()
                         else:
+                            # check prediction masks
+                            # fig = plt.figure(figsize=(20, 10))
+                            # nb_gt_ms = gt_masks.shape[1]
+                            # gt_ms = gt_masks.cpu().detach().numpy()[0]
+                            # gt_ids = gt_class_ids.cpu().detach().numpy()[0]
+                            #
+                            # for idx, nb_gt_m in enumerate(range(nb_gt_ms)):
+                            #     ax = fig.add_subplot(idx // 5 + 1, 5, idx + 1)
+                            #     ax.imshow(gt_ms[idx])
+                            #     ax.title.set_text(dict_id2cat.get(gt_ids[idx]))
+                            # nb_pred = target_class_ids.shape[0]
+                            # nb_nonzero = np.sum(target_class_ids.cpu().detach().numpy() > 0)
+                            # pred_ms = target_mask.cpu().detach().numpy()
+                            # pred_ids = target_class_ids.cpu().detach().numpy()
+                            # for idx, pr in enumerate(range(nb_nonzero)):
+                            #     ax = fig.add_subplot(idx // 5 + 1 + 5, 5, idx + 1)
+                            #     ax.imshow(pred_ms[idx])
+                            #     ax.title.set_text(
+                            #         f"{dict_id2cat.get(pred_ids[idx])} with {nb_pred - nb_nonzero} zero preds")
+                            # fig.tight_layout(pad=3)
+                            # plt.show()
+
                             # Network Heads
                             # Proposal classifier and BBox regressor heads
+                            # print("2", rois.size()[0])
                             mrcnn_feature_maps = [p2_out[i].unsqueeze(0),p3_out[i].unsqueeze(0),p4_out[i].unsqueeze(0),p5_out[i].unsqueeze(0)]
                             mrcnn_class_logits, mrcnn_class, mrcnn_bbox = self.classifier(mrcnn_feature_maps, rois)
 
+                            # see whether is there any nonzero prediction during training
+                            preds = [np.where(row>=0.5) for row in mrcnn_class.cpu().detach().numpy()]
+                            # print([p[0] for p in preds if len(p[0])!=0]) # multiple boxes (with multiple? id in box)
+
+                            # if rois 15x4 -> mrcnn_bbox 15x81x4; mrcnn_class_logits, mrcnn_class: 15x81
                             # Create masks for detections
-                            mrcnn_mask = self.mask(mrcnn_feature_maps, rois)
-                            
+                            mrcnn_mask = self.mask(mrcnn_feature_maps, rois) # 15,81,28,28
+                            #np.where(mrcnn_mask.cpu().detach().numpy()>0)
                             
                         # Compute losses
-                        rpn_class_loss, rpn_bbox_loss, mrcnn_class_loss, mrcnn_bbox_loss, mrcnn_mask_loss = compute_losses(rpn_match, rpn_bbox, rpn_class_logits, rpn_pred_bbox, target_class_ids, mrcnn_class_logits, target_deltas, mrcnn_bbox, target_mask, mrcnn_mask)
+                        rpn_class_loss, rpn_bbox_loss, mrcnn_class_loss, mrcnn_bbox_loss, mrcnn_mask_loss = \
+                            compute_losses(rpn_match, rpn_bbox, rpn_class_logits, rpn_pred_bbox, target_class_ids,
+                                           mrcnn_class_logits, target_deltas, mrcnn_bbox, target_mask, mrcnn_mask)
                         img_loss = rpn_class_loss + rpn_bbox_loss + mrcnn_class_loss + mrcnn_bbox_loss + mrcnn_mask_loss
                         loss=loss+img_loss
                 loss=loss/BatchSize
@@ -1806,15 +1962,38 @@ class MaskRCNN(nn.Module):
                 torch.nn.utils.clip_grad_norm_(self.parameters(), 5.0)
                 optimizer.step()
                 epoch_loss += loss.item()
-                print("===> Epoch[{}]({}/{}): Loss: {:.4f}".format(epoch, step, steps, loss.item()))
+
+                # grads = [p.grad for n, p in self.classifier.conv1.named_parameters() if p.requires_grad][0][0][0]
+                val = list(self.classifier.conv1.parameters())[0][0][0]
+                # True if grad is not all 0
+                assert np.any([v_t!=v for v_t, v in zip(temp_param, list(val.cpu().detach().numpy()))])
+
+                # print("===> Epoch[{}]({}/{}): Loss: {:.4f}".format(epoch, step, steps, loss.item()))
                 step=step+1
                 if step%steps==0:
-                    print("===> Epoch {} Complete: Avg. Loss: {:.4f}".format(epoch, epoch_loss / steps))
-                    # save model
+                    avg_loss = epoch_loss / step
+                    s = "===> Epoch[{}]({}/{}): Avg Loss so far: {:.4f}".format(epoch, step, nb_batches, avg_loss)
+                    print(s)
+                    with open('./logs/mrcnn_log.txt', 'a') as f:
+                        dt_string = odatetime.now().strftime("%d/%m/%Y %H:%M:%S")
+                        f.write(s + "\n")
+                    # log_dict = dict()
+                    # log_dict['tr_loss'] = tr_loss
+                    # log_dict['te_loss'] = te_loss
+                    if use_wandb:
+                        wandb.log({'loss': avg_loss})
+
                     torch.save(self.state_dict(), self.checkpoint_path.format(epoch))
-                    break
+
+            # save model
+            # End of each epoch
+            # torch.save(self.state_dict(), self.checkpoint_path.format(epoch))
+            # break
+
+            print("This training epoch took %.2f minutes" % ((time.time() - start_time) / 60.0))
 
         self.epoch = epochs
+
 
     def predict(self, input, mode):
         molded_images = input[0]

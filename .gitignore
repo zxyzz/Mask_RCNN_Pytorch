@@ -1,0 +1,9 @@
+.idea/*
+data/*
+logs/*
+newT.txt
+nms/*
+nms_/*
+roialign/*
+roialign/roi_align/build.py
+roialign/roi_align/crop_and_resize.py

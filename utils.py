@@ -18,9 +18,20 @@ import skimage.color
 import skimage.io
 import torch
 
+import skimage.transform
+import cv2
+from datetime import datetime
+import matplotlib.pyplot as plt
 ############################################################
 #  Bounding Boxes
 ############################################################
+
+cats = ['person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light','fire hydrant','stop sign','parking meter',
+        'bench','bird','cat','dog','horse','sheep','cow','elephant','bear','zebra','giraffe','backpack','umbrella','handbag','tie','suitcase','frisbee',
+        'skis','snowboard','sports ball','kite','baseball bat','baseball glove','skateboard','surfboard','tennis racket','bottle','wine glass','cup',
+        'fork','knife','spoon','bowl','banana','apple','sandwich','orange','broccoli','carrot','hot dog','pizza','donut','cake','chair','couch',
+        'potted plant','bed','dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone','microwave','oven','toaster','sink',
+        'refrigerator','book','clock','vase','scissors','teddy bear','hair drier','toothbrush']
 
 def extract_bboxes(mask):
     """Compute bounding boxes from masks.
@@ -303,9 +314,11 @@ def resize_image(image, min_dim=None, max_dim=None, padding=False):
             scale = max_dim / image_max
     # Resize image and mask
     if scale != 1:
-        image = scipy.misc.imresize(
-            image, (round(h * scale), round(w * scale)))
-    # Need padding?
+        # image = scipy.misc.imresize(
+        #     image, (round(h * scale), round(w * scale)))
+        # image = skimage.transform.resize(image, (round(h * scale), round(w * scale)))
+        image = cv2.resize(image, (round(h * scale), round(w * scale)))
+        # Need padding?
     if padding:
         # Get new height and width
         h, w = image.shape[:2]
@@ -329,8 +342,55 @@ def resize_mask(mask, scale, padding):
             [(top, bottom), (left, right), (0, 0)]
     """
     h, w = mask.shape[:2]
-    mask = scipy.ndimage.zoom(mask, zoom=[scale, scale, 1], order=0)
-    mask = np.pad(mask, padding, mode='constant', constant_values=0)
+    # from scipy import ndimage, misc
+    # fig = plt.figure(figsize=(15, 8))
+    # ax1 = fig.add_subplot(161)
+    # ax2 = fig.add_subplot(162)
+    # ax3 = fig.add_subplot(163)
+    # ax4 = fig.add_subplot(164)
+    # ax5 = fig.add_subplot(165)
+    # ax6 = fig.add_subplot(166)
+    # ax1.imshow(image1) #ori
+    # ax1.title.set_text(image1.shape)
+    # ax2.imshow(image)
+    # ax2.title.set_text(image.shape)
+    # c = cv2.resize(mask, (round(h * scale), round(w * scale)))
+    # i = 2
+    # ax3.imshow(c[:, :, i])
+    # ax3.title.set_text(c.shape)
+    # cp = np.pad(c, padding, mode='constant', constant_values=0)
+    # ax4.imshow(cp[:, :, i])
+    # ax4.title.set_text(cp.shape)
+    # m = scipy.ndimage.zoom(mask, zoom=[scale, scale, 1], order=0)
+    # ax5.imshow(m[:, :, i])
+    # ax5.title.set_text(m.shape)
+    # mp = np.pad(m, padding, mode='constant', constant_values=0)
+    # ax6.imshow(mp[:, :, i])
+    # ax6.title.set_text(mp.shape)
+    # plt.show()
+
+    mask = cv2.resize(mask, (round(h * scale), round(w * scale))) # scipy.ndimage.zoom(mask, zoom=[scale, scale, 1], order=0)
+    if len(mask.shape) == 2:
+        # {ValueError}operands could not be broadcast together with remapped shapes [original->remapped]: (3,2)
+        # and requested shape (2,2)
+        mask = np.pad(mask[:, :, np.newaxis], padding, mode='constant', constant_values=0)
+    else:
+        mask = np.pad(mask, padding, mode='constant', constant_values=0)
+
+        # h, w = mask.shape
+        # if padding[0] != (0,0): # top bottom
+        #     mask = np.vstack((np.zeros((padding[0][0], w)), mask))
+        #     mask = np.vstack((mask, np.zeros((padding[0][1], w))))
+        #     plt.imshow(mask)
+        #     plt.title(mask.shape)
+        #     plt.show()
+        # else: # left right
+        #     mask = np.hstack((np.zeros((h, padding[1][0])), mask))
+        #     mask = np.hstack((mask,np.zeros((h, padding[1][1]))))
+
+        # {RuntimeError}sequence argument must have length equal to input rank
+        # mask = scipy.ndimage.zoom(mask, zoom=[scale, scale, 1], order=0)
+        # mask = np.pad(mask, padding, mode='constant', constant_values=0)
     return mask
 
 
@@ -347,7 +407,9 @@ def minimize_mask(bbox, mask, mini_shape):
         m = m[y1:y2, x1:x2]
         if m.size == 0:
             raise Exception("Invalid bounding box with area of zero")
-        m = scipy.misc.imresize(m.astype(float), mini_shape, interp='bilinear')
+        # m = scipy.misc.imresize(m.astype(float), mini_shape, interp='bilinear')
+        # m = skimage.transform.resize(m.astype(float), mini_shape)
+        m = cv2.resize(m.astype(float), mini_shape, interpolation=cv2.INTER_LINEAR)
         mini_mask[:, :, i] = np.where(m >= 128, 1, 0)
     return mini_mask
 
@@ -364,7 +426,8 @@ def expand_mask(bbox, mini_mask, image_shape):
         y1, x1, y2, x2 = bbox[i][:4]
         h = y2 - y1
         w = x2 - x1
-        m = scipy.misc.imresize(m.astype(float), (h, w), interp='bilinear')
+        # m = scipy.misc.imresize(m.astype(float), (h, w), interp='bilinear')
+        m = cv2.resize(m.astype(float), (h, w), interpolation=cv2.INTER_LINEAR)
         mask[y1:y2, x1:x2, i] = np.where(m >= 128, 1, 0)
     return mask
 
@@ -384,8 +447,14 @@ def unmold_mask(mask, bbox, image_shape):
     """
     threshold = 0.5
     y1, x1, y2, x2 = bbox
-    mask = scipy.misc.imresize(
-        mask, (y2 - y1, x2 - x1), interp='bilinear').astype(np.float32) / 255.0
+    # mask = scipy.misc.imresize(
+    #     mask, (y2 - y1, x2 - x1), interp='bilinear').astype(np.float32) / 255.0
+
+    # could not broadcast input array from shape (115,45) into shape (45,115)
+    # mask = cv2.resize(mask, (y2 - y1, x2 - x1), interpolation=cv2.INTER_LINEAR).astype(np.float32) / 255.0
+    # OMM when eval #TODO
+    mask = cv2.resize(mask, (x2 - x1, y2 - y1), interpolation=cv2.INTER_LINEAR).astype(np.float32) / 255.0
+
     mask = np.where(mask >= threshold, 1, 0).astype(np.uint8)
 
     # Put the mask in the right location.

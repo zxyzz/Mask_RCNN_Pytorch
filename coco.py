@@ -26,11 +26,11 @@ Usage: import the module (see Jupyter notebooks for examples), or run from
     # Run COCO evaluatoin on the last model you trained
     python3 coco.py evaluate --dataset=/path/to/coco/ --model=last
 """
-
+import torch
 import os
 import time
 import numpy as np
-
+import matplotlib.pyplot as plt
 # Download and install the Python COCO tools from https://github.com/waleedka/coco
 # That's a fork from the original https://github.com/pdollar/coco with a bug
 # fix for Python 3.
@@ -50,6 +50,18 @@ import utils
 import model as modellib
 
 import torch
+import wandb
+import sys
+import matplotlib.patches as patches
+
+from datetime import datetime as odatetime
+
+cats = ['person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light','fire hydrant','stop sign','parking meter',
+        'bench','bird','cat','dog','horse','sheep','cow','elephant','bear','zebra','giraffe','backpack','umbrella','handbag','tie','suitcase','frisbee',
+        'skis','snowboard','sports ball','kite','baseball bat','baseball glove','skateboard','surfboard','tennis racket','bottle','wine glass','cup',
+        'fork','knife','spoon','bowl','banana','apple','sandwich','orange','broccoli','carrot','hot dog','pizza','donut','cake','chair','couch',
+        'potted plant','bed','dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone','microwave','oven','toaster','sink',
+        'refrigerator','book','clock','vase','scissors','teddy bear','hair drier','toothbrush']
 
 # Root directory of the project
 ROOT_DIR = os.getcwd()
@@ -60,7 +72,7 @@ COCO_MODEL_PATH = os.path.join(ROOT_DIR, "mask_rcnn_coco.pth")
 # Directory to save logs and model checkpoints, if not provided
 # through the command line argument --logs
 DEFAULT_LOGS_DIR = os.path.join(ROOT_DIR, "logs")
-DEFAULT_DATASET_YEAR = "2014"
+DEFAULT_DATASET_YEAR = "2017"
 
 ############################################################
 #  Configurations
@@ -235,6 +247,7 @@ class CocoDataset(utils.Dataset):
         instance_masks = []
         class_ids = []
         annotations = self.image_info[image_id]["annotations"]
+
         # Build mask of shape [height, width, instance_count] and list
         # of class IDs that correspond to each channel of the mask.
         for annotation in annotations:
@@ -337,7 +350,7 @@ def build_coco_results(dataset, image_ids, rois, class_ids, scores, masks):
     return results
 
 
-def evaluate_coco(model, dataset, coco, eval_type="bbox", limit=0, image_ids=None):
+def evaluate_coco(model, dataset, coco, device, eval_type="bbox", limit=0, dict_id2cat=None, image_ids=None):
     """Runs official COCO evaluation.
     dataset: A Dataset object with valiadtion data
     eval_type: "bbox" or "segm" for bounding box or segmentation evaluation
@@ -348,7 +361,7 @@ def evaluate_coco(model, dataset, coco, eval_type="bbox", limit=0, image_ids=Non
 
     # Limit to a subset
     if limit:
-        image_ids = image_ids[:limit]
+        image_ids = np.random.permutation(image_ids)[:limit]
 
     # Get corresponding COCO image IDs.
     coco_image_ids = [dataset.image_info[id]["id"] for id in image_ids]
@@ -363,8 +376,29 @@ def evaluate_coco(model, dataset, coco, eval_type="bbox", limit=0, image_ids=Non
 
         # Run detection
         t = time.time()
-        r = model.detect([image])[0]
+        # r = model.detect([image])[0]
+        r = model.detect([image], device)[0]
         t_prediction += (time.time() - t)
+
+        fig = plt.figure(figsize=(15, 7))
+        for idx in range(r['rois'].shape[0]):
+            if idx == 0:
+                ax = fig.add_subplot(151)
+                ax.imshow(image)
+            else:
+                idx -= 1
+                mask = r["masks"][:, :, idx]
+                b = r['rois'][idx]
+                ax = fig.add_subplot(idx // 5 + 5, 5, idx + 1)
+                ax.imshow(mask)
+                rect = patches.Rectangle((b[1], b[0]), b[3] - b[1], b[2] - b[0], linewidth=2, edgecolor='r',
+                                         facecolor='none')
+                rx, ry = rect.get_xy()
+                plt.text(rx, ry + 30, dict_id2cat.get(r['class_ids'][idx]), fontsize=13, color='r', weight='bold')
+                # rect = patches.Rectangle((b[0], b[1]), b[2] - b[0], b[3] - b[1], linewidth=4, edgecolor='r', facecolor='none')
+                ax.add_patch(rect)
+        plt.savefig(f'/home/lts5/Pictures/pred_{image_id}_{coco_image_ids[i]}.png')
+        # a=1
 
         # Convert results to COCO format
         image_results = build_coco_results(dataset, coco_image_ids[i:i + 1],
@@ -398,25 +432,25 @@ if __name__ == '__main__':
     # Parse command line arguments
     parser = argparse.ArgumentParser(
         description='Train Mask R-CNN on MS COCO.')
-    parser.add_argument("command",
-                        metavar="<command>",
-                        help="'train' or 'evaluate' on MS COCO")
+    parser.add_argument("--command",
+                        default="train",
+                        help="'train' or 'eval' on MS COCO")
     parser.add_argument('--dataset', required=True,
-                        metavar="/path/to/coco/",
+                        metavar="./data",
                         help='Directory of the MS-COCO dataset')
     parser.add_argument('--year', required=False,
                         default=DEFAULT_DATASET_YEAR,
                         metavar="<year>",
                         help='Year of the MS-COCO dataset (2014 or 2017) (default=2014)')
     parser.add_argument('--model', required=False,
-                        metavar="/path/to/weights.pth",
+                        default="./logs/coco20211127T1331/mask_rcnn_coco_0005.pth",
                         help="Path to weights .pth file or 'coco'")
     parser.add_argument('--logs', required=False,
                         default=DEFAULT_LOGS_DIR,
                         metavar="/path/to/logs/",
                         help='Logs and checkpoints directory (default=logs/)')
     parser.add_argument('--limit', required=False,
-                        default=500,
+                        default=5,
                         metavar="<image count>",
                         help='Images to use for evaluation (default=500)')
     parser.add_argument('--download', required=False,
@@ -431,11 +465,23 @@ if __name__ == '__main__':
                         default=4,
                         help='Batch size')
     parser.add_argument('--steps', required=False,
-                        default=200,
+                        default=100,
                         help='steps per epoch')    
     parser.add_argument('--device', required=False,
                         default="gpu",
-                        help='gpu or cpu')                         
+                        help='gpu or cpu')
+
+    parser.add_argument('--epochs', required=False,
+                        default=10,
+                        help='Number of training epochs')
+    parser.add_argument('--epochs2', required=False,
+                        default=15,
+                        help='Number of Stage 2 epochs')
+    parser.add_argument('--epochs3', required=False,
+                        default=20,
+                        help='Number of Stage 3 epochs')
+    parser.add_argument('--use_wandb', default=False, action='store_true', help='Use wandb.')
+
     args = parser.parse_args()                        
 
     print("Command: ", args.command)
@@ -456,7 +502,8 @@ if __name__ == '__main__':
             IMAGES_PER_GPU = 1
             DETECTION_MIN_CONFIDENCE = 0
         config = InferenceConfig()
-    config.display()
+
+    # config.display()
 
     # Create model
     if args.command == "train":
@@ -471,86 +518,138 @@ if __name__ == '__main__':
         device = torch.device("cuda")
     else:
         device = torch.device("cpu")
-    
+    print(device)
+
     model = model.to(device)
 
     # Select weights file to load
-    if args.model:
-        if args.model.lower() == "coco":
-            model_path = COCO_MODEL_PATH
-        elif args.model.lower() == "last":
-            # Find last trained weights
-            model_path = model.find_last()[1]
-        elif args.model.lower() == "imagenet":
-            # Start from ImageNet trained weights
-            model_path = config.IMAGENET_MODEL_PATH
-        else:
-            model_path = args.model
-    else:
-        model_path = ""
+    # if args.model:
+    #     if args.model.lower() == "coco":
+    #         model_path = COCO_MODEL_PATH
+    #     elif args.model.lower() == "last":
+    #         # Find last trained weights
+    #         model_path = model.find_last()[1]
+    #     elif args.model.lower() == "imagenet":
+    #         # Start from ImageNet trained weights
+    #         model_path = config.IMAGENET_MODEL_PATH
+    #     else:
+    #         model_path = args.model
+    # else:
+    #     model_path = ""
 
     # Load weights
-    print("Loading weights ", model_path)
-    model.load_weights(model_path)
+    if args.command == "eval":
+        print("Loading weights ", args.model)
+        model.load_weights(args.model)
 
     # input parameters
     lr=float(args.lr)
     batchsize=int(args.batchsize)
     steps=int(args.steps)
-    
+
+    # output_filename = 'mrcnn_log'
+    # with open(f'./logs/{output_filename}.txt', 'a') as f:
+    with open('./logs/mrcnn_log.txt', 'a') as f:
+        dt_string = odatetime.now().strftime("%d/%m/%Y %H:%M:%S")
+        f.write(f"######## {dt_string} ######## {model.checkpoint_path}\n")
+        f.write(' '.join(sys.argv[1:]) + "\n")
+    print(dt_string)
+
+    # create dictionaries of categories and id
+    with open('cat80.txt') as file:
+        cats = file.readlines()
+    dict_id2cat = dict()
+    for id_, cat in enumerate(cats):
+        dict_id2cat[id_ + 1] = cat.replace('\n', '')
+    dict_cat2id = {v: k for k, v in dict_id2cat.items()}
+
     # Train or evaluate
     if args.command == "train":
         # Training dataset. Use the training set and 35K from the
         # validation set, as as in the Mask RCNN paper.
+
+        if args.use_wandb:
+            wandb.init(project='mrcnn', entity='zxyzz')
+            w_config = wandb.config
+            w_config.learning_rate = lr
+            wandb.watch(model, log='all', log_freq=1)
+
+        #laa
+
         dataset_train = CocoDataset()
-        dataset_train.load_coco(args.dataset, "train", year=args.year, auto_download=args.download)
-        dataset_train.load_coco(args.dataset, "valminusminival", year=args.year, auto_download=args.download)
+        coco = dataset_train.load_coco(args.dataset, 'val', year=2017, auto_download=False,
+                                       class_ids=None, class_map=None, return_coco=True)
+        # dataset_train.load_coco(args.dataset, "valminusminival", year=args.year, auto_download=args.download)
         dataset_train.prepare()
 
         # Validation dataset
-        dataset_val = CocoDataset()
-        dataset_val.load_coco(args.dataset, "minival", year=args.year, auto_download=args.download)
-        dataset_val.prepare()
-
-        # *** This training schedule is an example. Update to your needs ***
+        # dataset_val = CocoDataset()
+        # coco = dataset_val.load_coco(args.dataset, "minival", year=args.year, return_coco=True,
+        #                              auto_download=True)
+        # dataset_val.prepare()
 
         # Training - Stage 1
         print("Training network heads")
-        model.train_model(dataset_train, dataset_val,
-                    learning_rate=config.LEARNING_RATE,
-                    epochs=40,
-                    BatchSize=batchsize,
-                    steps=steps,
-                    layers='heads')
+        model.train_model(dataset_train,
+                          learning_rate=lr,
+                          epochs=args.epochs,
+                          BatchSize=batchsize,
+                          steps=steps,
+                          layers='heads',
+                          dict_id2cat=dict_id2cat,
+                          use_wandb=args.use_wandb)
+
+        # print("Stage 1: Running COCO evaluation on {} images.".format(args.limit))
+        # evaluate_coco(model, dataset_train, coco, device, "bbox", dict_id2cat=dict_id2cat, limit=2)
 
         # Training - Stage 2
         # Finetune layers from ResNet stage 4 and up
         print("Fine tune Resnet stage 4 and up")
-        model.train_model(dataset_train, dataset_val,
-                    learning_rate=config.LEARNING_RATE,
-                    epochs=120,
+        model.train_model(dataset_train,
+                    learning_rate=lr,
+                    epochs=args.epochs2,
                     BatchSize=batchsize,
                     steps=steps,
-                    layers='4+')
+                    layers='4+',
+                          use_wandb=args.use_wandb)
+
+        # print("Stage 2: Running COCO evaluation on {} images.".format(args.limit))
+        # evaluate_coco(model, dataset_train, coco, device, "bbox", limit=int(args.limit))
 
         # Training - Stage 3
         # Fine tune all layers
         print("Fine tune all layers")
-        model.train_model(dataset_train, dataset_val,
-                    learning_rate=config.LEARNING_RATE / 10,
-                    epochs=160,
+        model.train_model(dataset_train,
+                    learning_rate=lr / 10,
+                    epochs=args.epochs3,
                     BatchSize=batchsize,
                     steps=steps,
-                    layers='all')
+                    layers='all',
+                          use_wandb=args.use_wandb)
 
-    elif args.command == "evaluate":
+        # print("Stage 3: Running COCO evaluation on {} images.".format(args.limit))
+        # evaluate_coco(model, dataset_train, coco, device, "bbox", limit=int(args.limit))
+
+
+    elif args.command == "eval":
         # Validation dataset
+        # dataset_val = CocoDataset()
+        # coco = dataset_val.load_coco(args.dataset, "minival", year=args.year, return_coco=True, auto_download=args.download)
+        # dataset_val.prepare()
+
         dataset_val = CocoDataset()
-        coco = dataset_val.load_coco(args.dataset, "minival", year=args.year, return_coco=True, auto_download=args.download)
+        coco = dataset_val.load_coco(args.dataset, 'val', year=2017, auto_download=False,
+                                       class_ids=None, class_map=None, return_coco=True)
         dataset_val.prepare()
+
         print("Running COCO evaluation on {} images.".format(args.limit))
-        evaluate_coco(model, dataset_val, coco, "bbox", limit=int(args.limit))
-        evaluate_coco(model, dataset_val, coco, "segm", limit=int(args.limit))
+        evaluate_coco(model, dataset_val, coco, device, "bbox", dict_id2cat=dict_id2cat, limit=2)
+
+        # evaluate_coco(model, dataset_val, coco, "bbox", limit=int(args.limit))
+        # evaluate_coco(model, dataset_val, coco, "segm", limit=int(args.limit))
     else:
         print("'{}' is not recognized. "
               "Use 'train' or 'evaluate'".format(args.command))
+
+
+    print("Done")
