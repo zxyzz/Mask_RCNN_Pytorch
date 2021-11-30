@@ -37,6 +37,7 @@ import wandb
 from datetime import datetime as odatetime
 import torchvision.models as models
 
+import vision_transformer as vits
 cats = ['BG','person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light','fire hydrant','stop sign','parking meter',
         'bench','bird','cat','dog','horse','sheep','cow','elephant','bear','zebra','giraffe','backpack','umbrella','handbag','tie','suitcase','frisbee',
         'skis','snowboard','sports ball','kite','baseball bat','baseball glove','skateboard','surfboard','tennis racket','bottle','wine glass','cup',
@@ -45,6 +46,7 @@ cats = ['BG','person','bicycle','car','motorcycle','airplane','bus','train','tru
         'refrigerator','book','clock','vase','scissors','teddy bear','hair drier','toothbrush']
 
 RES18 = True
+VITS = False
 
 # import warnings
 # warnings.filterwarnings('ignore')
@@ -1484,7 +1486,9 @@ class Dataset(torch.utils.data.Dataset):
 class Pre_Resnet(nn.Module):
     def __init__(self):
         super(Pre_Resnet, self).__init__()
-        self.pretrained_resnet = models.resnet18(pretrained=True, progress=True)
+        # self.pretrained_resnet = models.resnet18(pretrained=True, progress=True)
+        self.pretrained_resnet = torch.hub.load('pytorch/vision:v0.10.0', 'resnet18', pretrained=True)
+        # self.pretrained_resnet.eval()
 
     def forward(self, inputs): # bs,3,1024,1024
         x = self.pretrained_resnet.conv1(inputs)
@@ -1553,12 +1557,23 @@ class MaskRCNN(nn.Module):
                                                                                   [16],
                                                                                   config.RPN_ANCHOR_STRIDE)).float(), requires_grad=False)
 
+            # self.fpn = vits.__dict__['vit_small'](patch_size=16, num_classes=0)
+            # self.fpn.load_state_dict(torch.load('./data/dino_deitsmall16_pretrain.pth'))
+            # self.anchors = Variable(torch.from_numpy(utils.generate_pyramid_anchors([128],
+            #                                                                       config.RPN_ANCHOR_RATIOS,
+            #                                                                       [[64, 64]],
+            #                                                                       [16],
+            #                                                                       config.RPN_ANCHOR_STRIDE)).float(), requires_grad=False)
+
+
         if self.config.GPU_COUNT:
             self.anchors = self.anchors.cuda()
 
         # RPN
-        self.rpn = RPN(len(config.RPN_ANCHOR_RATIOS), config.RPN_ANCHOR_STRIDE, 256)
-        # self.rpn = RPN(len(config.RPN_ANCHOR_RATIOS), config.RPN_ANCHOR_STRIDE, depth=512)
+        if not VITS:
+            self.rpn = RPN(len(config.RPN_ANCHOR_RATIOS), config.RPN_ANCHOR_STRIDE, 256)
+        else:
+            self.rpn = RPN(len(config.RPN_ANCHOR_RATIOS), config.RPN_ANCHOR_STRIDE, depth=1536)
 
         # FPN Classifier
         self.classifier = Classifier(256, config.POOL_SIZE, config.IMAGE_SHAPE, config.NUM_CLASSES)
@@ -1892,12 +1907,36 @@ class MaskRCNN(nn.Module):
                 # bs,256,64,64
                 # bs,256,32,32
                 # bs,256,16,16
-                if not RES18:
-                    [p2_out, p3_out, p4_out, p5_out, p6_out] = self.fpn(images) # vits
+                ###########################
+                # self.P4_conv1(c4_out) + F.interpolate(p5_out, scale_factor=2)
+                #
+                # # bs, 64, 256, 256
+                # x = self.pretrained_resnet.layer1(x)  # bs,64,256,256 -> upsample
+                # x = self.pretrained_resnet.layer2(x)  # bs,256,128,128
+                # x = self.pretrained_resnet.layer3(x)  # bs,256,64,64
+                # # x = self.pretrained_resnet.layer4(x) # bs,512,32,32 -> downsample
+                # add self.new.layer5(x) # 256,16,16
+                ###########################
+
+
+                if VITS:
+                    # vits
+                    # TODO ANCHOR
+                    with torch.no_grad():
+                        # list of 4 elem. of 4,4097,384
+                        intermediate_output = self.fpn.get_intermediate_layers(images, 4)
+                        # list of 1 elem of 4,1536
+                        rpn_feature_maps = [torch.cat([x[:, 0] for x in intermediate_output], dim=-1).unsqueeze(2).unsqueeze(3)]
+                elif RES18:
+                    #np.where(rpn_feature_maps[0][0][0][2].cpu().detach().numpy()!=0)
+                    self.fpn.eval()
+                    # # bs, 512,32,32 if fpn is resnet18
+                    rpn_feature_maps = [self.fpn(images)]
+                else:
+                    [p2_out, p3_out, p4_out, p5_out, p6_out] = self.fpn(images)
                     # Note that P6 is used in RPN, but not in the classifier heads.
                     rpn_feature_maps = [p2_out, p3_out, p4_out, p5_out, p6_out]
-                else:
-                    rpn_feature_maps = [self.fpn(images)]# if fpn is resnet18 -> output size (bs, 512,32,32)
+
 
                 # Loop through pyramid layers
                 layer_outputs = []  # list of lists
