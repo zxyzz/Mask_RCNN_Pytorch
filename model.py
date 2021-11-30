@@ -35,6 +35,7 @@ from einops import rearrange
 import matplotlib.patches as patches
 import wandb
 from datetime import datetime as odatetime
+import torchvision.models as models
 
 cats = ['BG','person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light','fire hydrant','stop sign','parking meter',
         'bench','bird','cat','dog','horse','sheep','cow','elephant','bear','zebra','giraffe','backpack','umbrella','handbag','tie','suitcase','frisbee',
@@ -42,6 +43,9 @@ cats = ['BG','person','bicycle','car','motorcycle','airplane','bus','train','tru
         'fork','knife','spoon','bowl','banana','apple','sandwich','orange','broccoli','carrot','hot dog','pizza','donut','cake','chair','couch',
         'potted plant','bed','dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone','microwave','oven','toaster','sink',
         'refrigerator','book','clock','vase','scissors','teddy bear','hair drier','toothbrush']
+
+RES18 = True
+
 # import warnings
 # warnings.filterwarnings('ignore')
 def norm_image(img):
@@ -434,14 +438,20 @@ def pyramid_roi_align(inputs, pool_size, image_shape):
         image_area = image_area.cuda()
     roi_level = 4 + log2(torch.sqrt(h*w)/(224.0/torch.sqrt(image_area)))
     roi_level = roi_level.round().int()
-    roi_level = roi_level.clamp(2,5)
 
-
-    # Loop through levels and apply ROI pooling to each. P2 to P5.
     pooled = []
     box_to_level = []
-    for i, level in enumerate(range(2, 6)):
-        ix  = roi_level==level
+    if not RES18:
+        # Loop through levels and apply ROI pooling to each. P2 to P5.
+        roi_level = roi_level.clamp(2,5)
+        nb = range(2, 6)
+    else:
+        roi_level = roi_level.clamp(2,2)
+        nb = range(2, 3)
+
+    for i, level in enumerate(nb):
+    # for i, level in enumerate(range(2, 6)):
+        ix = roi_level==level
         if not ix.any():
             continue
         ix = torch.nonzero(ix)[:,0]
@@ -921,6 +931,7 @@ class Classifier(nn.Module):
         self.linear_bbox = nn.Linear(1024, num_classes * 4)
 
     def forward(self, x, rois):
+        co = x
         x = pyramid_roi_align([rois]+x, self.pool_size, self.image_shape)
         x = self.conv1(x)
         x = self.bn1(x)
@@ -935,6 +946,22 @@ class Classifier(nn.Module):
 
         mrcnn_bbox = self.linear_bbox(x)
         mrcnn_bbox = mrcnn_bbox.view(mrcnn_bbox.size()[0], -1, 4)
+
+        if rois.shape[0] != mrcnn_class_logits.shape[0]:
+            x = pyramid_roi_align([rois] + co, self.pool_size, self.image_shape)
+            x = self.conv1(x)
+            x = self.bn1(x)
+            x = self.relu(x)
+            x = self.conv2(x)
+            x = self.bn2(x)
+            x = self.relu(x)
+
+            x = x.view(-1, 1024)
+            mrcnn_class_logits = self.linear_class(x)
+            mrcnn_probs = self.softmax(mrcnn_class_logits)
+
+            mrcnn_bbox = self.linear_bbox(x)
+            mrcnn_bbox = mrcnn_bbox.view(mrcnn_bbox.size()[0], -1, 4)
 
         return [mrcnn_class_logits, mrcnn_probs, mrcnn_bbox]
 
@@ -1122,7 +1149,7 @@ def compute_losses(rpn_match, rpn_bbox, rpn_class_logits, rpn_pred_bbox, target_
 
     rpn_class_loss = compute_rpn_class_loss(rpn_match, rpn_class_logits)
     rpn_bbox_loss = compute_rpn_bbox_loss(rpn_bbox, rpn_match, rpn_pred_bbox)
-    mrcnn_class_loss = compute_mrcnn_class_loss(target_class_ids, mrcnn_class_logits)
+    mrcnn_class_loss = compute_mrcnn_class_loss(target_class_ids, mrcnn_class_logits) #7,81
     mrcnn_bbox_loss = compute_mrcnn_bbox_loss(target_deltas, target_class_ids, mrcnn_bbox)
     mrcnn_mask_loss = compute_mrcnn_mask_loss(target_mask, target_class_ids, mrcnn_mask)
 
@@ -1375,11 +1402,19 @@ class Dataset(torch.utils.data.Dataset):
 
         # Anchors
         # [anchor_count, (y1, x1, y2, x2)]
-        self.anchors = utils.generate_pyramid_anchors(config.RPN_ANCHOR_SCALES,
-                                                 config.RPN_ANCHOR_RATIOS,
-                                                 config.BACKBONE_SHAPES,
-                                                 config.BACKBONE_STRIDES,
-                                                 config.RPN_ANCHOR_STRIDE)
+        if not RES18:
+            self.anchors = utils.generate_pyramid_anchors(config.RPN_ANCHOR_SCALES,
+                                                     config.RPN_ANCHOR_RATIOS,
+                                                     config.BACKBONE_SHAPES,
+                                                     config.BACKBONE_STRIDES,
+                                                     config.RPN_ANCHOR_STRIDE)
+        else:
+            # 12288
+            self.anchors = utils.generate_pyramid_anchors([128],
+                                                          config.RPN_ANCHOR_RATIOS,
+                                                          [[64,64]],
+                                                          [16],
+                                                          config.RPN_ANCHOR_STRIDE)
 
     def __getitem__(self, image_index):
         # Get GT bounding boxes and masks for image.
@@ -1446,6 +1481,25 @@ class Dataset(torch.utils.data.Dataset):
 #  MaskRCNN Class
 ############################################################
 
+class Pre_Resnet(nn.Module):
+    def __init__(self):
+        super(Pre_Resnet, self).__init__()
+        self.pretrained_resnet = models.resnet18(pretrained=True, progress=True)
+
+    def forward(self, inputs): # bs,3,1024,1024
+        x = self.pretrained_resnet.conv1(inputs)
+        x = self.pretrained_resnet.bn1(x)
+        x = self.pretrained_resnet.relu(x)
+        x = self.pretrained_resnet.maxpool(x) # bs,64,256,256
+
+        x = self.pretrained_resnet.layer1(x) # bs,64,256,256
+        x = self.pretrained_resnet.layer2(x) # bs,256,128,128
+        x = self.pretrained_resnet.layer3(x) # bs,256,64,64
+        # x = self.pretrained_resnet.layer4(x) # bs,512,32,32
+
+        return x  # self.pretrained_resnet.avgpool(x) # bs,512,1,1
+
+
 class MaskRCNN(nn.Module):
     """Encapsulates the Mask RCNN model functionality.
     """
@@ -1479,23 +1533,32 @@ class MaskRCNN(nn.Module):
         # Bottom-up Layers
         # Returns a list of the last layers of each stage, 5 in total.
         # Don't create the thead (stage 5), so we pick the 4th item in the list.
-        resnet = ResNet("resnet101", stage5=True) # -> TODO pre trained and res18 par example
-        C1, C2, C3, C4, C5 = resnet.stages() # C4
+        if not RES18:
+            resnet = ResNet("resnet101", stage5=True) # -> TODO pre trained and res18 par example
+            C1, C2, C3, C4, C5 = resnet.stages() # C4
+            # FPN network
+            self.fpn = FPN(C1, C2, C3, C4, C5, out_channels=256) # -> self.fpn() -> vits()
+            # Generate Anchors
+            self.anchors = Variable(torch.from_numpy(utils.generate_pyramid_anchors(config.RPN_ANCHOR_SCALES,
+                                                                                    config.RPN_ANCHOR_RATIOS,
+                                                                                    config.BACKBONE_SHAPES,
+                                                                                    config.BACKBONE_STRIDES,
+                                                                                    config.RPN_ANCHOR_STRIDE)).float(), requires_grad=False)
+        else:
+            self.fpn = Pre_Resnet()
+            # 12288
+            self.anchors = Variable(torch.from_numpy(utils.generate_pyramid_anchors([128],
+                                                                                  config.RPN_ANCHOR_RATIOS,
+                                                                                  [[64, 64]],
+                                                                                  [16],
+                                                                                  config.RPN_ANCHOR_STRIDE)).float(), requires_grad=False)
 
-        # FPN network # no more needed
-        self.fpn = FPN(C1, C2, C3, C4, C5, out_channels=256) # -> self.fpn() -> vits()
-
-        # Generate Anchors
-        self.anchors = Variable(torch.from_numpy(utils.generate_pyramid_anchors(config.RPN_ANCHOR_SCALES,
-                                                                                config.RPN_ANCHOR_RATIOS,
-                                                                                config.BACKBONE_SHAPES,
-                                                                                config.BACKBONE_STRIDES,
-                                                                                config.RPN_ANCHOR_STRIDE)).float(), requires_grad=False)
         if self.config.GPU_COUNT:
             self.anchors = self.anchors.cuda()
 
         # RPN
         self.rpn = RPN(len(config.RPN_ANCHOR_RATIOS), config.RPN_ANCHOR_STRIDE, 256)
+        # self.rpn = RPN(len(config.RPN_ANCHOR_RATIOS), config.RPN_ANCHOR_STRIDE, depth=512)
 
         # FPN Classifier
         self.classifier = Classifier(256, config.POOL_SIZE, config.IMAGE_SHAPE, config.NUM_CLASSES)
@@ -1766,8 +1829,17 @@ class MaskRCNN(nn.Module):
         # Skip gamma and beta weights of batch normalization layers.
         trainables_wo_bn = [param for name, param in self.named_parameters() if param.requires_grad and not 'bn' in name]
         trainables_only_bn = [param for name, param in self.named_parameters() if param.requires_grad and 'bn' in name]
-        optimizer = optim.SGD(self.parameters(), lr=learning_rate)
-        # todo
+        optimizer = optim.SGD([
+            {'params': trainables_wo_bn, 'weight_decay': self.config.WEIGHT_DECAY},
+            {'params': trainables_only_bn}], lr=learning_rate, momentum=self.config.LEARNING_MOMENTUM)
+        # optimizer = optim.SGD(self.parameters(), lr=learning_rate)
+
+        # sum(p.numel() for p in self.parameters() if p.requires_grad) # 21'488'120
+        # sum(p.numel() for p in self.fpn.parameters() if p.requires_grad) # 3'344'384
+        # sum(p.numel() for p in self.classifier.parameters() if p.requires_grad) # 14'310'805
+        # sum(p.numel() for p in self.mask.parameters() if p.requires_grad) # 2'643'537
+
+
         # Training
         #laa
         for epoch in range(self.epoch+1, epochs+1):
@@ -1815,10 +1887,17 @@ class MaskRCNN(nn.Module):
                 images = torch.stack(images).cuda()              
 
                 # Feature extraction
-                [p2_out, p3_out, p4_out, p5_out, p6_out] = self.fpn(images) # vits
-
-                # Note that P6 is used in RPN, but not in the classifier heads.
-                rpn_feature_maps = [p2_out, p3_out, p4_out, p5_out, p6_out]
+                # bs,256,256,256
+                # bs,256,128,128
+                # bs,256,64,64
+                # bs,256,32,32
+                # bs,256,16,16
+                if not RES18:
+                    [p2_out, p3_out, p4_out, p5_out, p6_out] = self.fpn(images) # vits
+                    # Note that P6 is used in RPN, but not in the classifier heads.
+                    rpn_feature_maps = [p2_out, p3_out, p4_out, p5_out, p6_out]
+                else:
+                    rpn_feature_maps = [self.fpn(images)]# if fpn is resnet18 -> output size (bs, 512,32,32)
 
                 # Loop through pyramid layers
                 layer_outputs = []  # list of lists
@@ -1937,8 +2016,13 @@ class MaskRCNN(nn.Module):
 
                             # Network Heads
                             # Proposal classifier and BBox regressor heads
-                            # print("2", rois.size()[0])
-                            mrcnn_feature_maps = [p2_out[i].unsqueeze(0),p3_out[i].unsqueeze(0),p4_out[i].unsqueeze(0),p5_out[i].unsqueeze(0)]
+                            print("2", rois.size()[0])
+
+                            if not RES18:
+                                mrcnn_feature_maps = [p2_out[i].unsqueeze(0),p3_out[i].unsqueeze(0),p4_out[i].unsqueeze(0),p5_out[i].unsqueeze(0)]
+                            else:
+                                mrcnn_feature_maps = [rpn_feature_maps[0][i].unsqueeze(0)]
+
                             mrcnn_class_logits, mrcnn_class, mrcnn_bbox = self.classifier(mrcnn_feature_maps, rois)
 
                             # see whether is there any nonzero prediction during training
@@ -1962,11 +2046,11 @@ class MaskRCNN(nn.Module):
                 torch.nn.utils.clip_grad_norm_(self.parameters(), 5.0)
                 optimizer.step()
                 epoch_loss += loss.item()
-
-                # grads = [p.grad for n, p in self.classifier.conv1.named_parameters() if p.requires_grad][0][0][0]
-                val = list(self.classifier.conv1.parameters())[0][0][0]
-                # True if grad is not all 0
-                assert np.any([v_t!=v for v_t, v in zip(temp_param, list(val.cpu().detach().numpy()))])
+                if rois.size()[0]:
+                    # grads = [p.grad for n, p in self.classifier.conv1.named_parameters() if p.requires_grad][0][0][0]
+                    val = list(self.classifier.conv1.parameters())[0][0][0]
+                    # True if grad is not all 0
+                    assert np.any([v_t!=v for v_t, v in zip(temp_param, list(val.cpu().detach().numpy()))])
 
                 # print("===> Epoch[{}]({}/{}): Loss: {:.4f}".format(epoch, step, steps, loss.item()))
                 step=step+1

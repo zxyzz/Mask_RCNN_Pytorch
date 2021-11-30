@@ -435,8 +435,8 @@ if __name__ == '__main__':
     parser.add_argument("--command",
                         default="train",
                         help="'train' or 'eval' on MS COCO")
-    parser.add_argument('--dataset', required=True,
-                        metavar="./data",
+    parser.add_argument('--dataset', required=False,
+                        default="./data",
                         help='Directory of the MS-COCO dataset')
     parser.add_argument('--year', required=False,
                         default=DEFAULT_DATASET_YEAR,
@@ -465,7 +465,7 @@ if __name__ == '__main__':
                         default=4,
                         help='Batch size')
     parser.add_argument('--steps', required=False,
-                        default=100,
+                        default=10,
                         help='steps per epoch')    
     parser.add_argument('--device', required=False,
                         default="gpu",
@@ -481,6 +481,7 @@ if __name__ == '__main__':
                         default=20,
                         help='Number of Stage 3 epochs')
     parser.add_argument('--use_wandb', default=False, action='store_true', help='Use wandb.')
+
 
     args = parser.parse_args()                        
 
