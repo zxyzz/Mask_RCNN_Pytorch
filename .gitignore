@@ -8,3 +8,5 @@ roialign/*
 roialign/roi_align/build.py
 roialign/roi_align/crop_and_resize.py
 __pycache__/*
+wandb/*
+mask_rcnn_c4.py

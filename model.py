@@ -36,8 +36,10 @@ import matplotlib.patches as patches
 import wandb
 from datetime import datetime as odatetime
 import torchvision.models as models
-
+from torchvision import transforms as pth_transforms
+import PIL
 import vision_transformer as vits
+# from roi_align.crop_and_resize import CropAndResizeFunction
 cats = ['BG','person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light','fire hydrant','stop sign','parking meter',
         'bench','bird','cat','dog','horse','sheep','cow','elephant','bear','zebra','giraffe','backpack','umbrella','handbag','tie','suitcase','frisbee',
         'skis','snowboard','sports ball','kite','baseball bat','baseball glove','skateboard','surfboard','tennis racket','bottle','wine glass','cup',
@@ -45,8 +47,11 @@ cats = ['BG','person','bicycle','car','motorcycle','airplane','bus','train','tru
         'potted plant','bed','dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone','microwave','oven','toaster','sink',
         'refrigerator','book','clock','vase','scissors','teddy bear','hair drier','toothbrush']
 
-RES18 = True
-VITS = False
+RES18 = False
+VITS = True
+
+# RES18 = True
+# VITS = False
 
 # import warnings
 # warnings.filterwarnings('ignore')
@@ -443,13 +448,13 @@ def pyramid_roi_align(inputs, pool_size, image_shape):
 
     pooled = []
     box_to_level = []
-    if not RES18:
+    if VITS or RES18:
+        roi_level = roi_level.clamp(2,2)
+        nb = range(2, 3)
+    else:
         # Loop through levels and apply ROI pooling to each. P2 to P5.
         roi_level = roi_level.clamp(2,5)
         nb = range(2, 6)
-    else:
-        roi_level = roi_level.clamp(2,2)
-        nb = range(2, 3)
 
     for i, level in enumerate(nb):
     # for i, level in enumerate(range(2, 6)):
@@ -645,15 +650,33 @@ def detection_target_layer(proposals, gt_class_ids, gt_boxes, gt_masks, config):
             box_ids = box_ids.cuda()
         # ori
         # masks = Variable(CropAndResizeFunction(config.MASK_SHAPE[0], config.MASK_SHAPE[1], 0)(roi_masks.unsqueeze(1), boxes, box_ids).data, requires_grad=False)
+
+        # masks = Variable(
+        #     CropAndResizeFunction.apply(roi_masks.unsqueeze(1), boxes, box_ids, config.MASK_SHAPE[0], config.MASK_SHAPE[1], 0))
+
         # All zero due to boxes in norm. coordinate
         # masks = roi_align(roi_masks.unsqueeze(1).detach(), [boxes], output_size=(config.MASK_SHAPE[0], config.MASK_SHAPE[1]))
+
         masks = roi_align(roi_masks.unsqueeze(1).detach(), [boxes*gt_masks.shape[-1]], output_size=(config.MASK_SHAPE[0], config.MASK_SHAPE[1]))
         masks = masks.squeeze(1)
+        # np.where(roi_align(roi_masks.unsqueeze(1).detach(), [boxes*gt_masks.shape[-1]], output_size=(config.MASK_SHAPE[0], config.MASK_SHAPE[1])).squeeze(1).cpu().detach().numpy()>0)
         # np.where(roi_masks[0].cpu().detach().numpy()>0)
         # np.where(masks[0].cpu().detach().numpy()>0) TODO
         #np.where(roi_align(roi_masks.unsqueeze(1).detach(), [boxes*1024], output_size=(1024,1024))[0].cpu().detach().numpy()>0)
-        # plt.imshow(masks[0][0].cpu().detach().numpy())
+        #TODO proob boxes
+        # fig = plt.figure(figsize=(15, 7))
+        # ax1 = fig.add_subplot(121)
+        # ax1.imshow(roi_masks[0].cpu().detach().numpy())
+        # b = boxes[0].cpu().detach().numpy() * 1024
+        # rect = patches.Rectangle((b[1], b[0]), b[3] - b[1], b[2] - b[0], linewidth=2, edgecolor='r',
+        #                          facecolor='none')
+        # rx, ry = rect.get_xy()
+        # plt.text(rx, ry+30, b, fontsize=13, color='r', weight='bold')
+        # ax1.add_patch(rect)
+        # ax2 = fig.add_subplot(122)
+        # ax2.imshow(masks[0].cpu().detach().numpy())
         # plt.show()
+
         # Threshold mask pixels at 0.5 to have GT masks be 0 or 1 to use with
         # binary cross entropy loss.
         masks = torch.round(masks)
@@ -1404,19 +1427,20 @@ class Dataset(torch.utils.data.Dataset):
 
         # Anchors
         # [anchor_count, (y1, x1, y2, x2)]
-        if not RES18:
-            self.anchors = utils.generate_pyramid_anchors(config.RPN_ANCHOR_SCALES,
-                                                     config.RPN_ANCHOR_RATIOS,
-                                                     config.BACKBONE_SHAPES,
-                                                     config.BACKBONE_STRIDES,
-                                                     config.RPN_ANCHOR_STRIDE)
-        else:
+        if VITS or RES18:
             # 12288
             self.anchors = utils.generate_pyramid_anchors([128],
                                                           config.RPN_ANCHOR_RATIOS,
                                                           [[64,64]],
                                                           [16],
                                                           config.RPN_ANCHOR_STRIDE)
+
+        else:
+            self.anchors = utils.generate_pyramid_anchors(config.RPN_ANCHOR_SCALES,
+                                                     config.RPN_ANCHOR_RATIOS,
+                                                     config.BACKBONE_SHAPES,
+                                                     config.BACKBONE_STRIDES,
+                                                     config.RPN_ANCHOR_STRIDE)
 
     def __getitem__(self, image_index):
         # Get GT bounding boxes and masks for image.
@@ -1444,7 +1468,8 @@ class Dataset(torch.utils.data.Dataset):
 
         # Add to batch
         rpn_match = rpn_match[:, np.newaxis]
-        images = mold_image(image.astype(np.float32), self.config)
+
+
         # ok
         # fig = plt.figure(figsize=(15, 7))
         # for idx in range(gt_masks.shape[-1] + 1):
@@ -1459,13 +1484,23 @@ class Dataset(torch.utils.data.Dataset):
         #         ax.imshow(mask)
         #         rect = patches.Rectangle((b[1], b[0]), b[3]-b[1], b[2]-b[0], linewidth=2, edgecolor='r', facecolor='none')
         #         rx, ry = rect.get_xy()
-        #         plt.text(rx, ry + 30, gt_class_ids[idx], fontsize=13, color='r', weight='bold')
+        #         plt.text(rx, ry + 30, cats[idx], fontsize=13, color='r', weight='bold')
         #         ax.add_patch(rect)
-        #         ax.title.set_text(gt_class_ids[idx])
+        #         #ax.title.set_text(gt_class_ids[idx])
         # plt.show()
 
-        # Convert
-        images = torch.from_numpy(images.transpose(2, 0, 1)).float()
+        if VITS or RES18:
+            images = image
+            train_transform = pth_transforms.Compose([
+                pth_transforms.ToTensor(),
+                pth_transforms.Normalize((0.485, 0.456, 0.407),(1,1,1)), #(0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
+            ]) # [i/255 for i in [123.7, 116.8, 103.9]]
+            images = train_transform(images)
+        else:
+            images = mold_image(image.astype(np.float32), self.config)
+            # Convert
+            images = torch.from_numpy(images.transpose(2, 0, 1)).float()
+            
         image_metas = torch.from_numpy(image_metas)
         rpn_match = torch.from_numpy(rpn_match)
         rpn_bbox = torch.from_numpy(rpn_bbox).float()
@@ -1487,8 +1522,11 @@ class Pre_Resnet(nn.Module):
     def __init__(self):
         super(Pre_Resnet, self).__init__()
         # self.pretrained_resnet = models.resnet18(pretrained=True, progress=True)
+        # self.pretrained_resnet = models.resnet18()
         self.pretrained_resnet = torch.hub.load('pytorch/vision:v0.10.0', 'resnet18', pretrained=True)
         # self.pretrained_resnet.eval()
+        self.pretrained_resnet = models.vgg19(pretrained=True, progress=True)
+
 
     def forward(self, inputs): # bs,3,1024,1024
         x = self.pretrained_resnet.conv1(inputs)
@@ -1533,22 +1571,7 @@ class MaskRCNN(nn.Module):
                             "to avoid fractions when downscaling and upscaling."
                             "For example, use 256, 320, 384, 448, 512, ... etc. ")
 
-        # Build the shared convolutional layers.
-        # Bottom-up Layers
-        # Returns a list of the last layers of each stage, 5 in total.
-        # Don't create the thead (stage 5), so we pick the 4th item in the list.
-        if not RES18:
-            resnet = ResNet("resnet101", stage5=True) # -> TODO pre trained and res18 par example
-            C1, C2, C3, C4, C5 = resnet.stages() # C4
-            # FPN network
-            self.fpn = FPN(C1, C2, C3, C4, C5, out_channels=256) # -> self.fpn() -> vits()
-            # Generate Anchors
-            self.anchors = Variable(torch.from_numpy(utils.generate_pyramid_anchors(config.RPN_ANCHOR_SCALES,
-                                                                                    config.RPN_ANCHOR_RATIOS,
-                                                                                    config.BACKBONE_SHAPES,
-                                                                                    config.BACKBONE_STRIDES,
-                                                                                    config.RPN_ANCHOR_STRIDE)).float(), requires_grad=False)
-        else:
+        if RES18:
             self.fpn = Pre_Resnet()
             # 12288
             self.anchors = Variable(torch.from_numpy(utils.generate_pyramid_anchors([128],
@@ -1556,30 +1579,51 @@ class MaskRCNN(nn.Module):
                                                                                   [[64, 64]],
                                                                                   [16],
                                                                                   config.RPN_ANCHOR_STRIDE)).float(), requires_grad=False)
+        elif VITS:
+            #todo ANCHOR
+            self.fpn = vits.__dict__['vit_small'](patch_size=16, num_classes=0)
+            print("Loading dino_deitsmall16_pretrain.pth")
+            self.fpn.load_state_dict(torch.load('./data/dino_deitsmall16_pretrain.pth'))
+            self.anchors = Variable(torch.from_numpy(utils.generate_pyramid_anchors([128],
+                                                                                  config.RPN_ANCHOR_RATIOS,
+                                                                                  [[64, 64]],
+                                                                                  [16],
+                                                                                  config.RPN_ANCHOR_STRIDE)).float(), requires_grad=False)
 
-            # self.fpn = vits.__dict__['vit_small'](patch_size=16, num_classes=0)
-            # self.fpn.load_state_dict(torch.load('./data/dino_deitsmall16_pretrain.pth'))
-            # self.anchors = Variable(torch.from_numpy(utils.generate_pyramid_anchors([128],
-            #                                                                       config.RPN_ANCHOR_RATIOS,
-            #                                                                       [[64, 64]],
-            #                                                                       [16],
-            #                                                                       config.RPN_ANCHOR_STRIDE)).float(), requires_grad=False)
+        else:
+            # Build the shared convolutional layers.
+            # Bottom-up Layers
+            # Returns a list of the last layers of each stage, 5 in total.
+            # Don't create the thead (stage 5), so we pick the 4th item in the list.
 
+            resnet = ResNet("resnet101", stage5=True)
+            C1, C2, C3, C4, C5 = resnet.stages()  # C4
+            # FPN network
+            self.fpn = FPN(C1, C2, C3, C4, C5, out_channels=256)
+            # Generate Anchors
+            self.anchors = Variable(torch.from_numpy(utils.generate_pyramid_anchors(config.RPN_ANCHOR_SCALES,
+                                                                                    config.RPN_ANCHOR_RATIOS,
+                                                                                    config.BACKBONE_SHAPES,
+                                                                                    config.BACKBONE_STRIDES,
+                                                                                    config.RPN_ANCHOR_STRIDE)).float(), requires_grad=False)
 
         if self.config.GPU_COUNT:
             self.anchors = self.anchors.cuda()
 
-        # RPN
-        if not VITS:
-            self.rpn = RPN(len(config.RPN_ANCHOR_RATIOS), config.RPN_ANCHOR_STRIDE, 256)
+
+        if VITS:
+            depth = 384
         else:
-            self.rpn = RPN(len(config.RPN_ANCHOR_RATIOS), config.RPN_ANCHOR_STRIDE, depth=1536)
+            depth = 256
+
+        # RPN
+        self.rpn = RPN(len(config.RPN_ANCHOR_RATIOS), config.RPN_ANCHOR_STRIDE, depth=depth)
 
         # FPN Classifier
-        self.classifier = Classifier(256, config.POOL_SIZE, config.IMAGE_SHAPE, config.NUM_CLASSES)
+        self.classifier = Classifier(depth, config.POOL_SIZE, config.IMAGE_SHAPE, config.NUM_CLASSES)
 
         # FPN Mask
-        self.mask = Mask(256, config.MASK_POOL_SIZE, config.IMAGE_SHAPE, config.NUM_CLASSES)
+        self.mask = Mask(depth, config.MASK_POOL_SIZE, config.IMAGE_SHAPE, config.NUM_CLASSES)
 
         # Fix batch norm layers
         def set_bn_fix(m):
@@ -1645,8 +1689,6 @@ class MaskRCNN(nn.Module):
         self.log_dir = os.path.join(self.model_dir, "{}{:%Y%m%dT%H%M}".format(
             self.config.NAME.lower(), now))
 
-        if not os.path.exists(self.log_dir):
-            os.makedirs(self.log_dir)
         # Path to save after each epoch. Include placeholders that get filled by Keras.
         self.checkpoint_path = os.path.join(self.log_dir, "mask_rcnn_{}_*epoch*.pth".format(
             self.config.NAME.lower()))
@@ -1862,7 +1904,7 @@ class MaskRCNN(nn.Module):
             epoch_loss = 0
             step = 0
 
-            temp_param = list(self.classifier.conv1.parameters())[0][0][0]
+            temp_param = list(self.classifier.parameters())[10]
             temp_param = [v for v in list(temp_param.cpu().detach().numpy())]
 
             start_time = time.time()
@@ -1879,7 +1921,7 @@ class MaskRCNN(nn.Module):
                 # for o in range(gt_boxes_batch[i].shape[0]):
                 #     if o == 0:
                 #         ax = fig.add_subplot(151)
-                #         ax.imshow(norm_image(rearrange(images[i], 'c b p -> b p c', c=3)))
+                #         ax.imshow(norm_image(rearrange(images[i].cpu().detach().numpy(), 'c b p -> b p c', c=3)))
                 #     else:
                 #         o -= 1
                 #         b = gt_boxes_batch[i][o]
@@ -1901,12 +1943,6 @@ class MaskRCNN(nn.Module):
                 # from list to tensor
                 images = torch.stack(images).cuda()              
 
-                # Feature extraction
-                # bs,256,256,256
-                # bs,256,128,128
-                # bs,256,64,64
-                # bs,256,32,32
-                # bs,256,16,16
                 ###########################
                 # self.P4_conv1(c4_out) + F.interpolate(p5_out, scale_factor=2)
                 #
@@ -1923,16 +1959,25 @@ class MaskRCNN(nn.Module):
                     # vits
                     # TODO ANCHOR
                     with torch.no_grad():
-                        # list of 4 elem. of 4,4097,384
-                        intermediate_output = self.fpn.get_intermediate_layers(images, 4)
-                        # list of 1 elem of 4,1536
-                        rpn_feature_maps = [torch.cat([x[:, 0] for x in intermediate_output], dim=-1).unsqueeze(2).unsqueeze(3)]
+                        # n,4,4097,384
+                        intermediate_output = self.fpn.get_intermediate_layers(images, n=1)
+                        # n,4,384,64,64
+                        p4_out = [rearrange(x[:, 1:, :], 'b (m n) c -> b c m n', n=64) for x in intermediate_output]
+                        # depth384, p2_out:n3, p3_out:n2, p4_out:n1, p5_out:n1+conv kernel2, p6_out:n1+conv kernel4
+                        # p2_out =
+
+                        # [torch.cat([x[:, 1:, :] for x in intermediate_output], dim=-1)]
+                        rpn_feature_maps = p4_out
+                        # output = torch.cat([x[:, 0] for x in intermediate_output], dim=-1)  # bs, 64x64+1, 384
                 elif RES18:
                     #np.where(rpn_feature_maps[0][0][0][2].cpu().detach().numpy()!=0)
                     self.fpn.eval()
                     # # bs, 512,32,32 if fpn is resnet18
                     rpn_feature_maps = [self.fpn(images)]
+                    a=1
                 else:
+                    # Feature extraction
+                    # bs,256: 256,256 -> 128,128 -> 64,64 -> 32,32 -> 16,16
                     [p2_out, p3_out, p4_out, p5_out, p6_out] = self.fpn(images)
                     # Note that P6 is used in RPN, but not in the classifier heads.
                     rpn_feature_maps = [p2_out, p3_out, p4_out, p5_out, p6_out]
@@ -2036,18 +2081,27 @@ class MaskRCNN(nn.Module):
                             # nb_gt_ms = gt_masks.shape[1]
                             # gt_ms = gt_masks.cpu().detach().numpy()[0]
                             # gt_ids = gt_class_ids.cpu().detach().numpy()[0]
-                            #
+                            # gt_b = gt_boxes.cpu().detach().numpy()[0] * 1024
                             # for idx, nb_gt_m in enumerate(range(nb_gt_ms)):
                             #     ax = fig.add_subplot(idx // 5 + 1, 5, idx + 1)
                             #     ax.imshow(gt_ms[idx])
+                            #     rect = patches.Rectangle((gt_b[idx][1], gt_b[idx][0]), gt_b[idx][3] - gt_b[idx][1],
+                            #                              gt_b[idx][2] - gt_b[idx][0],
+                            #                              linewidth=2, edgecolor='r', facecolor='none')
+                            #     ax.add_patch(rect)
                             #     ax.title.set_text(dict_id2cat.get(gt_ids[idx]))
                             # nb_pred = target_class_ids.shape[0]
                             # nb_nonzero = np.sum(target_class_ids.cpu().detach().numpy() > 0)
                             # pred_ms = target_mask.cpu().detach().numpy()
                             # pred_ids = target_class_ids.cpu().detach().numpy()
+                            # pred_b = rois.cpu().detach().numpy()[0] * 1024
                             # for idx, pr in enumerate(range(nb_nonzero)):
                             #     ax = fig.add_subplot(idx // 5 + 1 + 5, 5, idx + 1)
                             #     ax.imshow(pred_ms[idx])
+                            #     rect = patches.Rectangle((pred_b[1], pred_b[0]), pred_b[3] - pred_b[1],
+                            #                              pred_b[2] - pred_b[0], linewidth=2, edgecolor='r',
+                            #                              facecolor='none')
+                            #     ax.add_patch(rect)
                             #     ax.title.set_text(
                             #         f"{dict_id2cat.get(pred_ids[idx])} with {nb_pred - nb_nonzero} zero preds")
                             # fig.tight_layout(pad=3)
@@ -2055,18 +2109,21 @@ class MaskRCNN(nn.Module):
 
                             # Network Heads
                             # Proposal classifier and BBox regressor heads
-                            print("2", rois.size()[0])
+                            # print("2", rois.size()[0])
 
-                            if not RES18:
-                                mrcnn_feature_maps = [p2_out[i].unsqueeze(0),p3_out[i].unsqueeze(0),p4_out[i].unsqueeze(0),p5_out[i].unsqueeze(0)]
-                            else:
+                            if VITS or RES18:
                                 mrcnn_feature_maps = [rpn_feature_maps[0][i].unsqueeze(0)]
+                            else:
+                                mrcnn_feature_maps = [p2_out[i].unsqueeze(0),p3_out[i].unsqueeze(0),p4_out[i].unsqueeze(0),p5_out[i].unsqueeze(0)]
 
                             mrcnn_class_logits, mrcnn_class, mrcnn_bbox = self.classifier(mrcnn_feature_maps, rois)
 
                             # see whether is there any nonzero prediction during training
                             preds = [np.where(row>=0.5) for row in mrcnn_class.cpu().detach().numpy()]
                             # print([p[0] for p in preds if len(p[0])!=0]) # multiple boxes (with multiple? id in box)
+                            obs = [p[0] for p in preds if len(p[0]) != 0]
+                            if obs:
+                                print(obs)
 
                             # if rois 15x4 -> mrcnn_bbox 15x81x4; mrcnn_class_logits, mrcnn_class: 15x81
                             # Create masks for detections
@@ -2085,11 +2142,12 @@ class MaskRCNN(nn.Module):
                 torch.nn.utils.clip_grad_norm_(self.parameters(), 5.0)
                 optimizer.step()
                 epoch_loss += loss.item()
-                if rois.size()[0]:
-                    # grads = [p.grad for n, p in self.classifier.conv1.named_parameters() if p.requires_grad][0][0][0]
-                    val = list(self.classifier.conv1.parameters())[0][0][0]
-                    # True if grad is not all 0
-                    assert np.any([v_t!=v for v_t, v in zip(temp_param, list(val.cpu().detach().numpy()))])
+                # if rois.size()[0]:
+                #     # grads = [p.grad for n, p in self.classifier.named_parameters() if p.requires_grad][6]
+                #     val = list(self.classifier.parameters())[10]
+                #     # True if grad is not all 0
+                #     print("when rois non-empty, that param updated:", np.any([v_t!=v for v_t, v in zip(temp_param, list(val.cpu().detach().numpy()))]))
+                #     # assert np.any([v_t!=v for v_t, v in zip(temp_param, list(val.cpu().detach().numpy()))])
 
                 # print("===> Epoch[{}]({}/{}): Loss: {:.4f}".format(epoch, step, steps, loss.item()))
                 step=step+1
@@ -2106,8 +2164,10 @@ class MaskRCNN(nn.Module):
                     if use_wandb:
                         wandb.log({'loss': avg_loss})
 
+                    if not os.path.exists(self.log_dir):
+                        os.makedirs(self.log_dir)
                     torch.save(self.state_dict(), self.checkpoint_path.format(epoch))
-
+                    #laa
             # save model
             # End of each epoch
             # torch.save(self.state_dict(), self.checkpoint_path.format(epoch))
