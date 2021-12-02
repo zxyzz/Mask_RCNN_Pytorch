@@ -350,7 +350,7 @@ def build_coco_results(dataset, image_ids, rois, class_ids, scores, masks):
     return results
 
 
-def evaluate_coco(model, dataset, coco, device, eval_type="bbox", limit=0, dict_id2cat=None, image_ids=None):
+def evaluate_coco(model, dataset, coco, device, eval_type="bbox", limit=0, image_ids=None):
     """Runs official COCO evaluation.
     dataset: A Dataset object with valiadtion data
     eval_type: "bbox" or "segm" for bounding box or segmentation evaluation
@@ -394,7 +394,7 @@ def evaluate_coco(model, dataset, coco, device, eval_type="bbox", limit=0, dict_
                 rect = patches.Rectangle((b[1], b[0]), b[3] - b[1], b[2] - b[0], linewidth=2, edgecolor='r',
                                          facecolor='none')
                 rx, ry = rect.get_xy()
-                plt.text(rx, ry + 30, dict_id2cat.get(r['class_ids'][idx]), fontsize=13, color='r', weight='bold')
+                plt.text(rx, ry + 30, cats[r['class_ids'][idx]], fontsize=13, color='r', weight='bold')
                 # rect = patches.Rectangle((b[0], b[1]), b[2] - b[0], b[3] - b[1], linewidth=4, edgecolor='r', facecolor='none')
                 ax.add_patch(rect)
         plt.savefig(f'/home/lts5/Pictures/pred_{image_id}_{coco_image_ids[i]}.png')
@@ -440,6 +440,7 @@ if __name__ == '__main__':
                         help='Directory of the MS-COCO dataset')
     parser.add_argument('--year', required=False,
                         default=DEFAULT_DATASET_YEAR,
+                        type=int,
                         metavar="<year>",
                         help='Year of the MS-COCO dataset (2014 or 2017) (default=2014)')
     parser.add_argument('--model', required=False,
@@ -450,7 +451,8 @@ if __name__ == '__main__':
                         metavar="/path/to/logs/",
                         help='Logs and checkpoints directory (default=logs/)')
     parser.add_argument('--limit', required=False,
-                        default=5,
+                        default=2,
+                        type=int,
                         metavar="<image count>",
                         help='Images to use for evaluation (default=500)')
     parser.add_argument('--download', required=False,
@@ -463,24 +465,29 @@ if __name__ == '__main__':
                         help='Learning rate')
     parser.add_argument('--batchsize', required=False,
                         default=4,
+                        type=int,
                         help='Batch size')
     parser.add_argument('--steps', required=False,
                         default=10,
+                        type=int,
                         help='steps per epoch')    
     parser.add_argument('--device', required=False,
                         default="gpu",
                         help='gpu or cpu')
-
     parser.add_argument('--epochs', required=False,
                         default=10,
+                        type=int,
                         help='Number of training epochs')
     parser.add_argument('--epochs2', required=False,
                         default=15,
+                        type=int,
                         help='Number of Stage 2 epochs')
     parser.add_argument('--epochs3', required=False,
                         default=20,
+                        type=int,
                         help='Number of Stage 3 epochs')
     parser.add_argument('--use_wandb', default=False, action='store_true', help='Use wandb.')
+    parser.add_argument('--load', default=False, action='store_true', help='Load model.')
 
 
     args = parser.parse_args()                        
@@ -539,8 +546,9 @@ if __name__ == '__main__':
     #     model_path = ""
 
     # Load weights
-    if args.command == "eval":
-        print("Loading weights ", args.model)
+    if args.command == "eval" or args.load:
+        assert os.path.exists(args.model)
+        print("Loading local weights ", args.model)
         model.load_weights(args.model)
 
     # input parameters
@@ -557,12 +565,12 @@ if __name__ == '__main__':
     print(dt_string)
 
     # create dictionaries of categories and id
-    with open('cat80.txt') as file:
-        cats = file.readlines()
-    dict_id2cat = dict()
-    for id_, cat in enumerate(cats):
-        dict_id2cat[id_ + 1] = cat.replace('\n', '')
-    dict_cat2id = {v: k for k, v in dict_id2cat.items()}
+    # with open('cat80.txt') as file:
+    #     cats = file.readlines()
+    # dict_id2cat = dict()
+    # for id_, cat in enumerate(cats):
+    #     dict_id2cat[id_ + 1] = cat.replace('\n', '')
+    # dict_cat2id = {v: k for k, v in dict_id2cat.items()}
 
     # Train or evaluate
     if args.command == "train":
@@ -597,11 +605,10 @@ if __name__ == '__main__':
                           BatchSize=batchsize,
                           steps=steps,
                           layers='heads',
-                          dict_id2cat=dict_id2cat,
                           use_wandb=args.use_wandb)
 
         # print("Stage 1: Running COCO evaluation on {} images.".format(args.limit))
-        # evaluate_coco(model, dataset_train, coco, device, "bbox", dict_id2cat=dict_id2cat, limit=2)
+        # evaluate_coco(model, dataset_train, coco, device, "bbox", limit=2)
 
         # Training - Stage 2
         # Finetune layers from ResNet stage 4 and up
@@ -644,7 +651,7 @@ if __name__ == '__main__':
         dataset_val.prepare()
 
         print("Running COCO evaluation on {} images.".format(args.limit))
-        evaluate_coco(model, dataset_val, coco, device, "bbox", dict_id2cat=dict_id2cat, limit=2)
+        evaluate_coco(model, dataset_val, coco, device, "bbox", limit=args.limit)
 
         # evaluate_coco(model, dataset_val, coco, "bbox", limit=int(args.limit))
         # evaluate_coco(model, dataset_val, coco, "segm", limit=int(args.limit))

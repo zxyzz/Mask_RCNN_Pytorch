@@ -47,11 +47,11 @@ cats = ['BG','person','bicycle','car','motorcycle','airplane','bus','train','tru
         'potted plant','bed','dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone','microwave','oven','toaster','sink',
         'refrigerator','book','clock','vase','scissors','teddy bear','hair drier','toothbrush']
 
-RES18 = False
-VITS = True
+# RES18 = False
+# VITS = True
 
-# RES18 = True
-# VITS = False
+RES18 = True
+VITS = False
 
 # import warnings
 # warnings.filterwarnings('ignore')
@@ -822,6 +822,7 @@ def refine_detections(rois, probs, deltas, window, config):
     pre_nms_scores = class_scores[keep.data]
     pre_nms_rois = refined_rois[keep.data]
 
+    # TODO pre_nms_class_ids is emtpy, because class_ids is all zero
     for i, class_id in enumerate(unique1d(pre_nms_class_ids)):
         # Pick detections of this class
         ixs = torch.nonzero(pre_nms_class_ids == class_id)[:,0]
@@ -1427,13 +1428,26 @@ class Dataset(torch.utils.data.Dataset):
 
         # Anchors
         # [anchor_count, (y1, x1, y2, x2)]
-        if VITS or RES18:
+        if VITS :
             # 12288
             self.anchors = utils.generate_pyramid_anchors([128],
                                                           config.RPN_ANCHOR_RATIOS,
                                                           [[64,64]],
                                                           [16],
                                                           config.RPN_ANCHOR_STRIDE)
+        elif RES18:
+            self.anchors = utils.generate_pyramid_anchors([128],
+                                                          config.RPN_ANCHOR_RATIOS,
+                                                          [[64, 64]],
+                                                          [16],
+                                                          config.RPN_ANCHOR_STRIDE)
+
+            # vgg16
+            # self.anchors = utils.generate_pyramid_anchors([128],
+            #                                               config.RPN_ANCHOR_RATIOS,
+            #                                               [[32,32]],
+            #                                               [16],
+            #                                               config.RPN_ANCHOR_STRIDE)
 
         else:
             self.anchors = utils.generate_pyramid_anchors(config.RPN_ANCHOR_SCALES,
@@ -1500,7 +1514,7 @@ class Dataset(torch.utils.data.Dataset):
             images = mold_image(image.astype(np.float32), self.config)
             # Convert
             images = torch.from_numpy(images.transpose(2, 0, 1)).float()
-            
+
         image_metas = torch.from_numpy(image_metas)
         rpn_match = torch.from_numpy(rpn_match)
         rpn_bbox = torch.from_numpy(rpn_bbox).float()
@@ -1525,10 +1539,12 @@ class Pre_Resnet(nn.Module):
         # self.pretrained_resnet = models.resnet18()
         self.pretrained_resnet = torch.hub.load('pytorch/vision:v0.10.0', 'resnet18', pretrained=True)
         # self.pretrained_resnet.eval()
-        self.pretrained_resnet = models.vgg19(pretrained=True, progress=True)
+        # self.pretrained_resnet = models.vgg16(pretrained=True, progress=True)
 
 
-    def forward(self, inputs): # bs,3,1024,1024
+    def forward(self, inputs):
+        # return self.pretrained_resnet.features(inputs)
+        # # bs,3,1024,1024
         x = self.pretrained_resnet.conv1(inputs)
         x = self.pretrained_resnet.bn1(x)
         x = self.pretrained_resnet.relu(x)
@@ -1579,6 +1595,13 @@ class MaskRCNN(nn.Module):
                                                                                   [[64, 64]],
                                                                                   [16],
                                                                                   config.RPN_ANCHOR_STRIDE)).float(), requires_grad=False)
+            # vgg16
+            # self.anchors = Variable(torch.from_numpy(utils.generate_pyramid_anchors([128],
+            #                                                                       config.RPN_ANCHOR_RATIOS,
+            #                                                                       [[32, 32]],
+            #                                                                       [16],
+            #                                                                       config.RPN_ANCHOR_STRIDE)).float(), requires_grad=False)
+
         elif VITS:
             #todo ANCHOR
             self.fpn = vits.__dict__['vit_small'](patch_size=16, num_classes=0)
@@ -1615,6 +1638,9 @@ class MaskRCNN(nn.Module):
             depth = 384
         else:
             depth = 256
+
+        # VGG16
+        # depth =512
 
         # RPN
         self.rpn = RPN(len(config.RPN_ANCHOR_RATIOS), config.RPN_ANCHOR_STRIDE, depth=depth)
@@ -1778,7 +1804,7 @@ class MaskRCNN(nn.Module):
         molded_images, image_metas, windows = self.mold_inputs(images)
 
         # Convert images to torch tensor
-        molded_images = torch.from_numpy(molded_images.transpose(0, 3, 1, 2)).float()
+        molded_images = torch.from_numpy(molded_images)# torch.from_numpy(molded_images.transpose(0, 3, 1, 2)).float()
 
         # To GPU
         if self.config.GPU_COUNT:
@@ -1823,7 +1849,7 @@ class MaskRCNN(nn.Module):
         return [images, image_metas,rpn_match,rpn_bbox,gt_class_ids,gt_boxes,gt_masks]
     
 
-    def train_model(self, train_dataset, learning_rate, epochs,BatchSize,steps, layers,dict_id2cat=None,use_wandb=False):
+    def train_model(self, train_dataset, learning_rate, epochs,BatchSize,steps, layers,use_wandb=False):
         """Train the model.
         train_dataset, val_dataset: Training and validation Dataset objects.
         learning_rate: The learning rate to train with
@@ -1945,7 +1971,9 @@ class MaskRCNN(nn.Module):
 
                 ###########################
                 # self.P4_conv1(c4_out) + F.interpolate(p5_out, scale_factor=2)
-                #
+
+                #bs,256: 256,256 -> 128,128 -> 64,64 -> 32,32 -> 16,16
+
                 # # bs, 64, 256, 256
                 # x = self.pretrained_resnet.layer1(x)  # bs,64,256,256 -> upsample
                 # x = self.pretrained_resnet.layer2(x)  # bs,256,128,128
@@ -1974,7 +2002,6 @@ class MaskRCNN(nn.Module):
                     self.fpn.eval()
                     # # bs, 512,32,32 if fpn is resnet18
                     rpn_feature_maps = [self.fpn(images)]
-                    a=1
                 else:
                     # Feature extraction
                     # bs,256: 256,256 -> 128,128 -> 64,64 -> 32,32 -> 16,16
@@ -2089,7 +2116,7 @@ class MaskRCNN(nn.Module):
                             #                              gt_b[idx][2] - gt_b[idx][0],
                             #                              linewidth=2, edgecolor='r', facecolor='none')
                             #     ax.add_patch(rect)
-                            #     ax.title.set_text(dict_id2cat.get(gt_ids[idx]))
+                            #     ax.title.set_text(cats[gt_ids[idx]])
                             # nb_pred = target_class_ids.shape[0]
                             # nb_nonzero = np.sum(target_class_ids.cpu().detach().numpy() > 0)
                             # pred_ms = target_mask.cpu().detach().numpy()
@@ -2103,7 +2130,7 @@ class MaskRCNN(nn.Module):
                             #                              facecolor='none')
                             #     ax.add_patch(rect)
                             #     ax.title.set_text(
-                            #         f"{dict_id2cat.get(pred_ids[idx])} with {nb_pred - nb_nonzero} zero preds")
+                            #         f"{cats[pred_ids[idx]]} with {nb_pred - nb_nonzero} zero preds")
                             # fig.tight_layout(pad=3)
                             # plt.show()
 
@@ -2119,12 +2146,17 @@ class MaskRCNN(nn.Module):
                             mrcnn_class_logits, mrcnn_class, mrcnn_bbox = self.classifier(mrcnn_feature_maps, rois)
 
                             # see whether is there any nonzero prediction during training
-                            preds = [np.where(row>=0.5) for row in mrcnn_class.cpu().detach().numpy()]
-                            # print([p[0] for p in preds if len(p[0])!=0]) # multiple boxes (with multiple? id in box)
-                            obs = [p[0] for p in preds if len(p[0]) != 0]
-                            if obs:
-                                print(obs)
-
+                            # preds = [np.where(row>=0.5) for row in mrcnn_class.cpu().detach().numpy()]
+                            # # print([p[0] for p in preds if len(p[0])!=0]) # multiple boxes (with multiple? id in box)
+                            # obs = [p[0] for p in preds if len(p[0]) != 0]
+                            # if obs:
+                            #     print(obs)
+                            preds = list(set([np.argmax(v) for v in mrcnn_class.cpu().detach().numpy()]))
+                            if preds:
+                                a = f"pred: {preds}   rpn:{list(set(target_class_ids.cpu().numpy()))}   gt:{list(set(gt_class_ids.cpu().numpy()[0]))}"
+                                print(a) #TODO
+                                with open('./logs/mrcnn_log.txt', 'a') as f:
+                                    f.write(a + "\n")
                             # if rois 15x4 -> mrcnn_bbox 15x81x4; mrcnn_class_logits, mrcnn_class: 15x81
                             # Create masks for detections
                             mrcnn_mask = self.mask(mrcnn_feature_maps, rois) # 15,81,28,28
@@ -2154,9 +2186,8 @@ class MaskRCNN(nn.Module):
                 if step%steps==0:
                     avg_loss = epoch_loss / step
                     s = "===> Epoch[{}]({}/{}): Avg Loss so far: {:.4f}".format(epoch, step, nb_batches, avg_loss)
-                    print(s)
+                    print(s) #TODO
                     with open('./logs/mrcnn_log.txt', 'a') as f:
-                        dt_string = odatetime.now().strftime("%d/%m/%Y %H:%M:%S")
                         f.write(s + "\n")
                     # log_dict = dict()
                     # log_dict['tr_loss'] = tr_loss
@@ -2172,7 +2203,6 @@ class MaskRCNN(nn.Module):
             # End of each epoch
             # torch.save(self.state_dict(), self.checkpoint_path.format(epoch))
             # break
-
             print("This training epoch took %.2f minutes" % ((time.time() - start_time) / 60.0))
 
         self.epoch = epochs
@@ -2195,12 +2225,15 @@ class MaskRCNN(nn.Module):
 
             self.apply(set_bn_eval)
 
-        # Feature extraction
-        [p2_out, p3_out, p4_out, p5_out, p6_out] = self.fpn(molded_images)
-
-        # Note that P6 is used in RPN, but not in the classifier heads.
-        rpn_feature_maps = [p2_out, p3_out, p4_out, p5_out, p6_out]
-        mrcnn_feature_maps = [p2_out, p3_out, p4_out, p5_out]
+        if VITS or RES18:
+            rpn_feature_maps = [self.fpn(molded_images)]
+            mrcnn_feature_maps = [rpn_feature_maps[0]]
+        else:
+            # Feature extraction
+            [p2_out, p3_out, p4_out, p5_out, p6_out] = self.fpn(molded_images)
+            # Note that P6 is used in RPN, but not in the classifier heads.
+            rpn_feature_maps = [p2_out, p3_out, p4_out, p5_out, p6_out]
+            mrcnn_feature_maps = [p2_out, p3_out, p4_out, p5_out]
 
         # Loop through pyramid layers
         layer_outputs = []  # list of lists
@@ -2317,7 +2350,15 @@ class MaskRCNN(nn.Module):
                 min_dim=self.config.IMAGE_MIN_DIM,
                 max_dim=self.config.IMAGE_MAX_DIM,
                 padding=self.config.IMAGE_PADDING)
-            molded_image = mold_image(molded_image, self.config)
+            if VITS or RES18:
+                train_transform = pth_transforms.Compose([
+                    pth_transforms.ToTensor(),
+                    pth_transforms.Normalize((0.485, 0.456, 0.407), (1, 1, 1)),
+                    # (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
+                ])  # [i/255 for i in [123.7, 116.8, 103.9]]
+                molded_image = train_transform(molded_image)
+            else:
+                molded_image = mold_image(molded_image, self.config)
             # Build image_meta
             image_meta = compose_image_meta(
                 0, image.shape, window,
