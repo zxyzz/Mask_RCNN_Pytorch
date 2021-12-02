@@ -547,9 +547,11 @@ if __name__ == '__main__':
 
     # Load weights
     if args.command == "eval" or args.load:
-        assert os.path.exists(args.model)
+        assert os.path.isfile(args.model+'.pth')
         print("Loading local weights ", args.model)
         model.load_weights(args.model)
+    else:
+        print("No local weights were loadedlaa")
 
     # input parameters
     lr=float(args.lr)
@@ -584,7 +586,6 @@ if __name__ == '__main__':
             wandb.watch(model, log='all', log_freq=1)
 
         #laa
-
         dataset_train = CocoDataset()
         coco = dataset_train.load_coco(args.dataset, 'val', year=2017, auto_download=False,
                                        class_ids=None, class_map=None, return_coco=True)

@@ -38,6 +38,7 @@ from datetime import datetime as odatetime
 import torchvision.models as models
 from torchvision import transforms as pth_transforms
 import PIL
+import cv2
 import vision_transformer as vits
 # from roi_align.crop_and_resize import CropAndResizeFunction
 cats = ['BG','person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light','fire hydrant','stop sign','parking meter',
@@ -52,6 +53,13 @@ cats = ['BG','person','bicycle','car','motorcycle','airplane','bus','train','tru
 
 RES18 = True
 VITS = False
+
+# RES18 = False
+# VITS = False
+
+NORM_B = True
+
+# NORM_B = False
 
 # import warnings
 # warnings.filterwarnings('ignore')
@@ -386,16 +394,19 @@ def proposal_generator(inputs, proposal_count, nms_threshold, anchors, config=No
     keep = keep[:proposal_count]
     boxes = boxes[keep, :]
 
-    # Normalize dimensions to range of 0 to 1.
-    norm = Variable(torch.from_numpy(np.array([height, width, height, width])).float(), requires_grad=False)
-    if config.GPU_COUNT:
-        norm = norm.cuda()
-    normalized_boxes = boxes / norm
+    if NORM_B:
+        # Normalize dimensions to range of 0 to 1.
+        norm = Variable(torch.from_numpy(np.array([height, width, height, width])).float(), requires_grad=False)
+        if config.GPU_COUNT:
+            norm = norm.cuda()
+        normalized_boxes = boxes / norm
 
-    # Add back batch dimension
-    normalized_boxes = normalized_boxes.unsqueeze(0)
+        # Add back batch dimension
+        normalized_boxes = normalized_boxes.unsqueeze(0)
 
-    return normalized_boxes
+        return normalized_boxes
+    else:
+        return boxes
 
 
 ############################################################
@@ -433,6 +444,8 @@ def pyramid_roi_align(inputs, pool_size, image_shape):
     feature_maps = inputs[1:]
 
     # Assign each ROI to a level in the pyramid based on the ROI area.
+    if len(boxes.shape) != 2:
+        boxes = boxes.unsqueeze(0)
     y1, x1, y2, x2 = boxes.chunk(4, dim=1)
     h = y2 - y1
     w = x2 - x1
@@ -565,7 +578,7 @@ def detection_target_layer(proposals, gt_class_ids, gt_boxes, gt_masks, config):
     """
 
     # remove batch dimension
-    proposals = proposals.squeeze(0)
+    proposals = proposals.squeeze(0) #prrob nan 1 0 -> so prob rpn_rois
     gt_class_ids = gt_class_ids.squeeze(0)
     gt_boxes = gt_boxes.squeeze(0)
     gt_masks = gt_masks.squeeze(0)
@@ -653,28 +666,47 @@ def detection_target_layer(proposals, gt_class_ids, gt_boxes, gt_masks, config):
 
         # masks = Variable(
         #     CropAndResizeFunction.apply(roi_masks.unsqueeze(1), boxes, box_ids, config.MASK_SHAPE[0], config.MASK_SHAPE[1], 0))
+        if NORM_B:
+            masks = roi_align(roi_masks.unsqueeze(1).detach(), [boxes*gt_masks.shape[-1]], output_size=(config.MASK_SHAPE[0], config.MASK_SHAPE[1])).squeeze(1)
 
-        # All zero due to boxes in norm. coordinate
-        # masks = roi_align(roi_masks.unsqueeze(1).detach(), [boxes], output_size=(config.MASK_SHAPE[0], config.MASK_SHAPE[1]))
+            # masks = roi_align(roi_masks.unsqueeze(1).detach(), [boxes], output_size=(config.MASK_SHAPE[0], config.MASK_SHAPE[1]), spatial_scale=1024)
+            # y1, x1, y2, x2 = boxes.chunk(4, dim=1)
+            # boxes = torch.cat([x1, y1, x2, y2], dim=1)
+            # masks = roi_align(roi_masks.unsqueeze(1).detach(), [boxes*gt_masks.shape[-1]], output_size=(config.MASK_SHAPE[0], config.MASK_SHAPE[1]))
 
-        masks = roi_align(roi_masks.unsqueeze(1).detach(), [boxes*gt_masks.shape[-1]], output_size=(config.MASK_SHAPE[0], config.MASK_SHAPE[1]))
-        masks = masks.squeeze(1)
+            # cust masks
+            # masks = []
+            for idx, box in enumerate(torch.round(boxes * 1024).cpu().detach().numpy()):
+                y1, x1, y2, x2 = box.astype(int)
+                a = cv2.resize(roi_masks[idx].cpu().detach().numpy()[y1:y2, x1:x2],
+                               (config.MASK_SHAPE[0], config.MASK_SHAPE[1]))
+                masks[idx] = Variable(torch.from_numpy(a).float(), requires_grad=False)
+                # masks.append(a)
+                # plt.imshow(cv2.resize(a, (config.MASK_SHAPE[0], config.MASK_SHAPE[1])))
+                # plt.show()
+
+            # masks = Variable(torch.from_numpy(np.array(masks)), requires_grad=False)
+        else:
+            # All zero due to boxes in norm. coordinate
+            masks = roi_align(roi_masks.unsqueeze(1).detach(), [boxes], output_size=(config.MASK_SHAPE[0], config.MASK_SHAPE[1])).squeeze(1)
+
+            # Variable(torch.from_numpy(a).float(), requires_grad=False)
+            # torch.from_numpy(scale)
+
         # np.where(roi_align(roi_masks.unsqueeze(1).detach(), [boxes*gt_masks.shape[-1]], output_size=(config.MASK_SHAPE[0], config.MASK_SHAPE[1])).squeeze(1).cpu().detach().numpy()>0)
         # np.where(roi_masks[0].cpu().detach().numpy()>0)
-        # np.where(masks[0].cpu().detach().numpy()>0) TODO
-        #np.where(roi_align(roi_masks.unsqueeze(1).detach(), [boxes*1024], output_size=(1024,1024))[0].cpu().detach().numpy()>0)
+        # np.where(masks[0].cpu().detach().numpy()>0) #TODO
         #TODO proob boxes
-        # fig = plt.figure(figsize=(15, 7))
-        # ax1 = fig.add_subplot(121)
-        # ax1.imshow(roi_masks[0].cpu().detach().numpy())
-        # b = boxes[0].cpu().detach().numpy() * 1024
-        # rect = patches.Rectangle((b[1], b[0]), b[3] - b[1], b[2] - b[0], linewidth=2, edgecolor='r',
-        #                          facecolor='none')
-        # rx, ry = rect.get_xy()
-        # plt.text(rx, ry+30, b, fontsize=13, color='r', weight='bold')
-        # ax1.add_patch(rect)
-        # ax2 = fig.add_subplot(122)
-        # ax2.imshow(masks[0].cpu().detach().numpy())
+        # fig, axs = plt.subplots(roi_masks.shape[0], 2, figsize=(10, 20))
+        # for o in range(roi_masks.shape[0]):
+        #     axs[o, 0].imshow(roi_masks[o].cpu().detach().numpy())
+        #     b = boxes[o].cpu().detach().numpy() * 1024
+        #     rect = patches.Rectangle((b[1], b[0]), b[3] - b[1], b[2] - b[0], linewidth=2, edgecolor='r',
+        #                              facecolor='none')
+        #     rx, ry = rect.get_xy()
+        #     plt.text(rx, ry + 30, b, fontsize=13, color='r', weight='bold')
+        #     axs[o, 0].add_patch(rect)
+        #     axs[o, 1].imshow(masks[o].cpu().detach().numpy())
         # plt.show()
 
         # Threshold mask pixels at 0.5 to have GT masks be 0 or 1 to use with
@@ -1537,22 +1569,22 @@ class Pre_Resnet(nn.Module):
         super(Pre_Resnet, self).__init__()
         # self.pretrained_resnet = models.resnet18(pretrained=True, progress=True)
         # self.pretrained_resnet = models.resnet18()
-        self.pretrained_resnet = torch.hub.load('pytorch/vision:v0.10.0', 'resnet18', pretrained=True)
+        # self.pretrained_resnet = torch.hub.load('pytorch/vision:v0.10.0', 'resnet18', pretrained=True)
         # self.pretrained_resnet.eval()
-        # self.pretrained_resnet = models.vgg16(pretrained=True, progress=True)
+        self.pretrained_resnet = models.vgg16(pretrained=True, progress=True)
 
 
-    def forward(self, inputs):
-        # return self.pretrained_resnet.features(inputs)
-        # # bs,3,1024,1024
-        x = self.pretrained_resnet.conv1(inputs)
-        x = self.pretrained_resnet.bn1(x)
-        x = self.pretrained_resnet.relu(x)
-        x = self.pretrained_resnet.maxpool(x) # bs,64,256,256
+    def forward(self, inputs): # bs,3,1024,1024
+        return self.pretrained_resnet.features(inputs)
 
-        x = self.pretrained_resnet.layer1(x) # bs,64,256,256
-        x = self.pretrained_resnet.layer2(x) # bs,256,128,128
-        x = self.pretrained_resnet.layer3(x) # bs,256,64,64
+        # x = self.pretrained_resnet.conv1(inputs)
+        # x = self.pretrained_resnet.bn1(x)
+        # x = self.pretrained_resnet.relu(x)
+        # x = self.pretrained_resnet.maxpool(x) # bs,64,256,256
+        #
+        # x = self.pretrained_resnet.layer1(x) # bs,64,256,256
+        # x = self.pretrained_resnet.layer2(x) # bs,256,128,128
+        # x = self.pretrained_resnet.layer3(x) # bs,256,64,64
         # x = self.pretrained_resnet.layer4(x) # bs,512,32,32
 
         return x  # self.pretrained_resnet.avgpool(x) # bs,512,1,1
@@ -1640,7 +1672,7 @@ class MaskRCNN(nn.Module):
             depth = 256
 
         # VGG16
-        # depth =512
+        depth =128
 
         # RPN
         self.rpn = RPN(len(config.RPN_ANCHOR_RATIOS), config.RPN_ANCHOR_STRIDE, depth=depth)
@@ -2001,7 +2033,10 @@ class MaskRCNN(nn.Module):
                     #np.where(rpn_feature_maps[0][0][0][2].cpu().detach().numpy()!=0)
                     self.fpn.eval()
                     # # bs, 512,32,32 if fpn is resnet18
-                    rpn_feature_maps = [self.fpn(images)]
+                    # rpn_feature_maps = [self.fpn(images)]
+
+                    # vgg16
+                    rpn_feature_maps = [rearrange(self.fpn(images), 'b (c e m) d f -> b m (d c) (f e)', m=128,c=2,e=2)]
                 else:
                     # Feature extraction
                     # bs,256: 256,256 -> 128,128 -> 64,64 -> 32,32 -> 16,16
@@ -2075,13 +2110,14 @@ class MaskRCNN(nn.Module):
                                  nms_threshold=self.config.RPN_NMS_THRESHOLD,
                                  anchors=self.anchors,
                                  config=self.config)
-                        
-                        # Normalize coordinates
-                        h, w = self.config.IMAGE_SHAPE[:2]
-                        scale = Variable(torch.from_numpy(np.array([h, w, h, w])).float(), requires_grad=False)
-                        if self.config.GPU_COUNT:
-                            scale = scale.cuda()
-                        gt_boxes = gt_boxes / scale
+
+                        if NORM_B:
+                            # Normalize coordinates
+                            h, w = self.config.IMAGE_SHAPE[:2]
+                            scale = Variable(torch.from_numpy(np.array([h, w, h, w])).float(), requires_grad=False)
+                            if self.config.GPU_COUNT:
+                                scale = scale.cuda()
+                            gt_boxes = gt_boxes / scale
 
                         # Generate detection targets
                         # Subsamples proposals and generates target outputs for training
@@ -2102,7 +2138,7 @@ class MaskRCNN(nn.Module):
                                 mrcnn_class = mrcnn_class.cuda()
                                 mrcnn_bbox = mrcnn_bbox.cuda()
                                 mrcnn_mask = mrcnn_mask.cuda()
-                        else:
+                        else: #prrob roi tjs: tensor([[0., 0., 1., 1.], [1., 0., 1., 0.], [1., 0., 1., 0.]], device='cuda:0', grad_fn=<CatBackward0>)
                             # check prediction masks
                             # fig = plt.figure(figsize=(20, 10))
                             # nb_gt_ms = gt_masks.shape[1]
@@ -2111,7 +2147,8 @@ class MaskRCNN(nn.Module):
                             # gt_b = gt_boxes.cpu().detach().numpy()[0] * 1024
                             # for idx, nb_gt_m in enumerate(range(nb_gt_ms)):
                             #     ax = fig.add_subplot(idx // 5 + 1, 5, idx + 1)
-                            #     ax.imshow(gt_ms[idx])
+                            #     #ax.imshow(gt_ms[idx])
+                            #     ax.imshow(rearrange(images[i].cpu().detach().numpy(), 'c b p -> b p c', c=3))
                             #     rect = patches.Rectangle((gt_b[idx][1], gt_b[idx][0]), gt_b[idx][3] - gt_b[idx][1],
                             #                              gt_b[idx][2] - gt_b[idx][0],
                             #                              linewidth=2, edgecolor='r', facecolor='none')
@@ -2121,10 +2158,12 @@ class MaskRCNN(nn.Module):
                             # nb_nonzero = np.sum(target_class_ids.cpu().detach().numpy() > 0)
                             # pred_ms = target_mask.cpu().detach().numpy()
                             # pred_ids = target_class_ids.cpu().detach().numpy()
-                            # pred_b = rois.cpu().detach().numpy()[0] * 1024
+                            # pred_bs = rois.cpu().detach().numpy() * 1024
                             # for idx, pr in enumerate(range(nb_nonzero)):
                             #     ax = fig.add_subplot(idx // 5 + 1 + 5, 5, idx + 1)
                             #     ax.imshow(pred_ms[idx])
+                            #     # ax.imshow(np.zeros((1024,1024)))
+                            #     pred_b = pred_bs[idx]
                             #     rect = patches.Rectangle((pred_b[1], pred_b[0]), pred_b[3] - pred_b[1],
                             #                              pred_b[2] - pred_b[0], linewidth=2, edgecolor='r',
                             #                              facecolor='none')
@@ -2142,7 +2181,7 @@ class MaskRCNN(nn.Module):
                                 mrcnn_feature_maps = [rpn_feature_maps[0][i].unsqueeze(0)]
                             else:
                                 mrcnn_feature_maps = [p2_out[i].unsqueeze(0),p3_out[i].unsqueeze(0),p4_out[i].unsqueeze(0),p5_out[i].unsqueeze(0)]
-
+                            # mrcnn_class_logits et mrcnn_class (nb_ob, 81); mrcnn_bbox (nb_ob, 81,4)
                             mrcnn_class_logits, mrcnn_class, mrcnn_bbox = self.classifier(mrcnn_feature_maps, rois)
 
                             # see whether is there any nonzero prediction during training
@@ -2151,17 +2190,23 @@ class MaskRCNN(nn.Module):
                             # obs = [p[0] for p in preds if len(p[0]) != 0]
                             # if obs:
                             #     print(obs)
+                            max_ = mrcnn_class.cpu().detach().numpy().max(axis=1)
+                            pre = [np.where(val == max_[idx])[0] for idx, val in enumerate(mrcnn_class.cpu().detach().numpy())]
+                            print("---")
+                            print("pre raw",pre)
                             preds = list(set([np.argmax(v) for v in mrcnn_class.cpu().detach().numpy()]))
                             if preds:
                                 a = f"pred: {preds}   rpn:{list(set(target_class_ids.cpu().numpy()))}   gt:{list(set(gt_class_ids.cpu().numpy()[0]))}"
                                 print(a) #TODO
-                                with open('./logs/mrcnn_log.txt', 'a') as f:
-                                    f.write(a + "\n")
+                            #     with open('./logs/mrcnn_log.txt', 'a') as f:
+                            #         f.write(a + "\n")
                             # if rois 15x4 -> mrcnn_bbox 15x81x4; mrcnn_class_logits, mrcnn_class: 15x81
                             # Create masks for detections
                             mrcnn_mask = self.mask(mrcnn_feature_maps, rois) # 15,81,28,28
-                            #np.where(mrcnn_mask.cpu().detach().numpy()>0)
-                            
+                            # m_ = np.where(mrcnn_mask.cpu().detach().numpy()>0)
+                            # print("pred mask ", m_)
+                            if np.where(mrcnn_mask.cpu().detach().numpy()>0):
+                                print("mrcnn_mask not all zero")
                         # Compute losses
                         rpn_class_loss, rpn_bbox_loss, mrcnn_class_loss, mrcnn_bbox_loss, mrcnn_mask_loss = \
                             compute_losses(rpn_match, rpn_bbox, rpn_class_logits, rpn_pred_bbox, target_class_ids,
