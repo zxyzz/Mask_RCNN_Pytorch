@@ -445,7 +445,7 @@ if __name__ == '__main__':
                         help='Year of the MS-COCO dataset (2014 or 2017) (default=2014)')
     parser.add_argument('--model', required=False,
                         default="./logs/coco20211127T1331/mask_rcnn_coco_0005.pth",
-                        help="Path to weights .pth file or 'coco'")
+                        help="Path to weights .pth file or 'coco'") # --model ./logs/coco20211201T1924_res18/mask_rcnn_coco_0015
     parser.add_argument('--logs', required=False,
                         default=DEFAULT_LOGS_DIR,
                         metavar="/path/to/logs/",

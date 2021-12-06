@@ -51,11 +51,11 @@ cats = ['BG','person','bicycle','car','motorcycle','airplane','bus','train','tru
 # RES18 = False
 # VITS = True
 
-RES18 = True
-VITS = False
-
-# RES18 = False
+# RES18 = True
 # VITS = False
+
+RES18 = False
+VITS = False
 
 NORM_B = True
 
@@ -678,11 +678,14 @@ def detection_target_layer(proposals, gt_class_ids, gt_boxes, gt_masks, config):
             # masks = []
             for idx, box in enumerate(torch.round(boxes * 1024).cpu().detach().numpy()):
                 y1, x1, y2, x2 = box.astype(int)
+                # a = cv2.resize(roi_masks[idx].cpu().detach().numpy()[y1:y2, x1:x2],
+                #                (config.MASK_SHAPE[0], config.MASK_SHAPE[1]))
                 a = cv2.resize(roi_masks[idx].cpu().detach().numpy()[y1:y2, x1:x2],
-                               (config.MASK_SHAPE[0], config.MASK_SHAPE[1]))
+                               (config.MASK_SHAPE[0], config.MASK_SHAPE[1]), interpolation=cv2.INTER_LINEAR)
                 masks[idx] = Variable(torch.from_numpy(a).float(), requires_grad=False)
                 # masks.append(a)
                 # plt.imshow(cv2.resize(a, (config.MASK_SHAPE[0], config.MASK_SHAPE[1])))
+                # plt.imshow(a)
                 # plt.show()
 
             # masks = Variable(torch.from_numpy(np.array(masks)), requires_grad=False)
@@ -1672,7 +1675,7 @@ class MaskRCNN(nn.Module):
             depth = 256
 
         # VGG16
-        depth =128
+        # depth =128
 
         # RPN
         self.rpn = RPN(len(config.RPN_ANCHOR_RATIOS), config.RPN_ANCHOR_STRIDE, depth=depth)
@@ -2014,13 +2017,13 @@ class MaskRCNN(nn.Module):
                 # add self.new.layer5(x) # 256,16,16
                 ###########################
 
-
+                # fee
                 if VITS:
                     # vits
                     # TODO ANCHOR
                     with torch.no_grad():
                         # n,4,4097,384
-                        intermediate_output = self.fpn.get_intermediate_layers(images, n=1)
+                        intermediate_output = self.fpn.get_intermediate_layers(images, n=4)
                         # n,4,384,64,64
                         p4_out = [rearrange(x[:, 1:, :], 'b (m n) c -> b c m n', n=64) for x in intermediate_output]
                         # depth384, p2_out:n3, p3_out:n2, p4_out:n1, p5_out:n1+conv kernel2, p6_out:n1+conv kernel4
@@ -2035,7 +2038,7 @@ class MaskRCNN(nn.Module):
                     # # bs, 512,32,32 if fpn is resnet18
                     # rpn_feature_maps = [self.fpn(images)]
 
-                    # vgg16
+                    # vgg16 bs,128,64,64
                     rpn_feature_maps = [rearrange(self.fpn(images), 'b (c e m) d f -> b m (d c) (f e)', m=128,c=2,e=2)]
                 else:
                     # Feature extraction
@@ -2147,13 +2150,14 @@ class MaskRCNN(nn.Module):
                             # gt_b = gt_boxes.cpu().detach().numpy()[0] * 1024
                             # for idx, nb_gt_m in enumerate(range(nb_gt_ms)):
                             #     ax = fig.add_subplot(idx // 5 + 1, 5, idx + 1)
-                            #     #ax.imshow(gt_ms[idx])
+                            #     # ax.imshow(gt_ms[idx])
                             #     ax.imshow(rearrange(images[i].cpu().detach().numpy(), 'c b p -> b p c', c=3))
                             #     rect = patches.Rectangle((gt_b[idx][1], gt_b[idx][0]), gt_b[idx][3] - gt_b[idx][1],
-                            #                              gt_b[idx][2] - gt_b[idx][0],
-                            #                              linewidth=2, edgecolor='r', facecolor='none')
+                            #                              gt_b[idx][2] - gt_b[idx][0], linewidth=2, edgecolor='r',
+                            #                              facecolor='none')
+                            #     rx, ry = rect.get_xy()
+                            #     plt.text(rx, ry + 30, cats[gt_ids[idx]], fontsize=13, color='r', weight='bold')
                             #     ax.add_patch(rect)
-                            #     ax.title.set_text(cats[gt_ids[idx]])
                             # nb_pred = target_class_ids.shape[0]
                             # nb_nonzero = np.sum(target_class_ids.cpu().detach().numpy() > 0)
                             # pred_ms = target_mask.cpu().detach().numpy()
@@ -2184,6 +2188,12 @@ class MaskRCNN(nn.Module):
                             # mrcnn_class_logits et mrcnn_class (nb_ob, 81); mrcnn_bbox (nb_ob, 81,4)
                             mrcnn_class_logits, mrcnn_class, mrcnn_bbox = self.classifier(mrcnn_feature_maps, rois)
 
+                            # if rois 15x4 -> mrcnn_bbox 15x81x4; mrcnn_class_logits, mrcnn_class: 15x81
+                            # Create masks for detections
+                            mrcnn_mask = self.mask(mrcnn_feature_maps, rois) # 15,81,28,28
+                            # m_ = np.where(mrcnn_mask.cpu().detach().numpy()>0)
+                            # print("pred mask ", m_)
+
                             # see whether is there any nonzero prediction during training
                             # preds = [np.where(row>=0.5) for row in mrcnn_class.cpu().detach().numpy()]
                             # # print([p[0] for p in preds if len(p[0])!=0]) # multiple boxes (with multiple? id in box)
@@ -2192,21 +2202,17 @@ class MaskRCNN(nn.Module):
                             #     print(obs)
                             max_ = mrcnn_class.cpu().detach().numpy().max(axis=1)
                             pre = [np.where(val == max_[idx])[0] for idx, val in enumerate(mrcnn_class.cpu().detach().numpy())]
-                            print("---")
-                            print("pre raw",pre)
                             preds = list(set([np.argmax(v) for v in mrcnn_class.cpu().detach().numpy()]))
                             if preds:
                                 a = f"pred: {preds}   rpn:{list(set(target_class_ids.cpu().numpy()))}   gt:{list(set(gt_class_ids.cpu().numpy()[0]))}"
+                                print("---")
+                                print("pre raw",pre)
                                 print(a) #TODO
-                            #     with open('./logs/mrcnn_log.txt', 'a') as f:
-                            #         f.write(a + "\n")
-                            # if rois 15x4 -> mrcnn_bbox 15x81x4; mrcnn_class_logits, mrcnn_class: 15x81
-                            # Create masks for detections
-                            mrcnn_mask = self.mask(mrcnn_feature_maps, rois) # 15,81,28,28
-                            # m_ = np.where(mrcnn_mask.cpu().detach().numpy()>0)
-                            # print("pred mask ", m_)
-                            if np.where(mrcnn_mask.cpu().detach().numpy()>0):
-                                print("mrcnn_mask not all zero")
+                                # with open('./logs/mrcnn_log.txt', 'a') as f:
+                                #     f.write(f"---\npre raw:{pre}\n")
+                                #     f.write(f"{a}\n")
+                                #     if np.where(mrcnn_mask.cpu().detach().numpy() > 0):
+                                #         f.write("mrcnn_mask: not all zero\n")
                         # Compute losses
                         rpn_class_loss, rpn_bbox_loss, mrcnn_class_loss, mrcnn_bbox_loss, mrcnn_mask_loss = \
                             compute_losses(rpn_match, rpn_bbox, rpn_class_logits, rpn_pred_bbox, target_class_ids,

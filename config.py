@@ -107,7 +107,7 @@ class Config(object):
     TRAIN_ROIS_PER_IMAGE = 200
 
     # Percent of positive ROIs used to train classifier/mask heads # TODO
-    ROI_POSITIVE_RATIO = 1#0.33
+    ROI_POSITIVE_RATIO = 0.8#0.33
 
     # Pooled ROIs
     POOL_SIZE = 7
