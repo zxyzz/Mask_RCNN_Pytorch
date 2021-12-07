@@ -51,15 +51,16 @@ cats = ['BG','person','bicycle','car','motorcycle','airplane','bus','train','tru
 # RES18 = False
 # VITS = True
 
-# RES18 = True
-# VITS = False
-
-RES18 = False
+RES18 = True
 VITS = False
+
+# RES18 = False
+# VITS = False
 
 NORM_B = True
 
 # NORM_B = False
+
 
 # import warnings
 # warnings.filterwarnings('ignore')
@@ -461,7 +462,8 @@ def pyramid_roi_align(inputs, pool_size, image_shape):
 
     pooled = []
     box_to_level = []
-    if VITS or RES18:
+    # if VITS or RES18:
+    if RES18:
         roi_level = roi_level.clamp(2,2)
         nb = range(2, 3)
     else:
@@ -1463,13 +1465,18 @@ class Dataset(torch.utils.data.Dataset):
 
         # Anchors
         # [anchor_count, (y1, x1, y2, x2)]
-        if VITS :
+        if VITS:
             # 12288
-            self.anchors = utils.generate_pyramid_anchors([128],
-                                                          config.RPN_ANCHOR_RATIOS,
-                                                          [[64,64]],
-                                                          [16],
-                                                          config.RPN_ANCHOR_STRIDE)
+            # self.anchors = utils.generate_pyramid_anchors([128],
+            #                                               config.RPN_ANCHOR_RATIOS,
+            #                                               [[64,64]],
+            #                                               [16],
+            #                                               config.RPN_ANCHOR_STRIDE)
+            self.anchors = Variable(torch.from_numpy(utils.generate_pyramid_anchors(config.RPN_ANCHOR_SCALES,
+                                                                                    config.RPN_ANCHOR_RATIOS,
+                                                                                    config.BACKBONE_SHAPES,
+                                                                                    config.BACKBONE_STRIDES,
+                                                                                    config.RPN_ANCHOR_STRIDE)).float(), requires_grad=False)
         elif RES18:
             self.anchors = utils.generate_pyramid_anchors([128],
                                                           config.RPN_ANCHOR_RATIOS,
@@ -1572,22 +1579,22 @@ class Pre_Resnet(nn.Module):
         super(Pre_Resnet, self).__init__()
         # self.pretrained_resnet = models.resnet18(pretrained=True, progress=True)
         # self.pretrained_resnet = models.resnet18()
-        # self.pretrained_resnet = torch.hub.load('pytorch/vision:v0.10.0', 'resnet18', pretrained=True)
+        self.pretrained_resnet = torch.hub.load('pytorch/vision:v0.10.0', 'resnet18', pretrained=True)
         # self.pretrained_resnet.eval()
-        self.pretrained_resnet = models.vgg16(pretrained=True, progress=True)
+        # self.pretrained_resnet = models.vgg16(pretrained=True, progress=True)
 
 
     def forward(self, inputs): # bs,3,1024,1024
-        return self.pretrained_resnet.features(inputs)
+        # return self.pretrained_resnet.features(inputs)
 
-        # x = self.pretrained_resnet.conv1(inputs)
-        # x = self.pretrained_resnet.bn1(x)
-        # x = self.pretrained_resnet.relu(x)
-        # x = self.pretrained_resnet.maxpool(x) # bs,64,256,256
-        #
-        # x = self.pretrained_resnet.layer1(x) # bs,64,256,256
-        # x = self.pretrained_resnet.layer2(x) # bs,256,128,128
-        # x = self.pretrained_resnet.layer3(x) # bs,256,64,64
+        x = self.pretrained_resnet.conv1(inputs)
+        x = self.pretrained_resnet.bn1(x)
+        x = self.pretrained_resnet.relu(x)
+        x = self.pretrained_resnet.maxpool(x) # bs,64,256,256
+
+        x = self.pretrained_resnet.layer1(x) # bs,64,256,256
+        x = self.pretrained_resnet.layer2(x) # bs,256,128,128
+        x = self.pretrained_resnet.layer3(x) # bs,256,64,64
         # x = self.pretrained_resnet.layer4(x) # bs,512,32,32
 
         return x  # self.pretrained_resnet.avgpool(x) # bs,512,1,1
@@ -1642,11 +1649,16 @@ class MaskRCNN(nn.Module):
             self.fpn = vits.__dict__['vit_small'](patch_size=16, num_classes=0)
             print("Loading dino_deitsmall16_pretrain.pth")
             self.fpn.load_state_dict(torch.load('./data/dino_deitsmall16_pretrain.pth'))
-            self.anchors = Variable(torch.from_numpy(utils.generate_pyramid_anchors([128],
-                                                                                  config.RPN_ANCHOR_RATIOS,
-                                                                                  [[64, 64]],
-                                                                                  [16],
-                                                                                  config.RPN_ANCHOR_STRIDE)).float(), requires_grad=False)
+            # self.anchors = Variable(torch.from_numpy(utils.generate_pyramid_anchors([128],
+            #                                                                       config.RPN_ANCHOR_RATIOS,
+            #                                                                       [[64, 64]],
+            #                                                                       [16],
+            #                                                                       config.RPN_ANCHOR_STRIDE)).float(), requires_grad=False)
+            self.anchors = Variable(torch.from_numpy(utils.generate_pyramid_anchors(config.RPN_ANCHOR_SCALES,
+                                                                                    config.RPN_ANCHOR_RATIOS,
+                                                                                    config.BACKBONE_SHAPES,
+                                                                                    config.BACKBONE_STRIDES,
+                                                                                    config.RPN_ANCHOR_STRIDE)).float(), requires_grad=False)
 
         else:
             # Build the shared convolutional layers.
@@ -2002,44 +2014,33 @@ class MaskRCNN(nn.Module):
                 # plt.show()
 
                 # from list to tensor
-                images = torch.stack(images).cuda()              
-
-                ###########################
-                # self.P4_conv1(c4_out) + F.interpolate(p5_out, scale_factor=2)
-
-                #bs,256: 256,256 -> 128,128 -> 64,64 -> 32,32 -> 16,16
-
-                # # bs, 64, 256, 256
-                # x = self.pretrained_resnet.layer1(x)  # bs,64,256,256 -> upsample
-                # x = self.pretrained_resnet.layer2(x)  # bs,256,128,128
-                # x = self.pretrained_resnet.layer3(x)  # bs,256,64,64
-                # # x = self.pretrained_resnet.layer4(x) # bs,512,32,32 -> downsample
-                # add self.new.layer5(x) # 256,16,16
-                ###########################
+                images = torch.stack(images).cuda()
 
                 # fee
                 if VITS:
                     # vits
-                    # TODO ANCHOR
                     with torch.no_grad():
                         # n,4,4097,384
                         intermediate_output = self.fpn.get_intermediate_layers(images, n=4)
                         # n,4,384,64,64
-                        p4_out = [rearrange(x[:, 1:, :], 'b (m n) c -> b c m n', n=64) for x in intermediate_output]
+                        intermediate_output = [rearrange(x[:, 1:, :], 'b (m n) c -> b c m n', n=64) for x in intermediate_output] # [torch.cat([x[:, 1:, :] for x in intermediate_output], dim=-1)]
                         # depth384, p2_out:n3, p3_out:n2, p4_out:n1, p5_out:n1+conv kernel2, p6_out:n1+conv kernel4
-                        # p2_out =
+                        p2_out = F.interpolate(intermediate_output[0], scale_factor=4)
+                        p3_out = F.interpolate(intermediate_output[1], scale_factor=2)
+                        p4_out = intermediate_output[3]
+                        p5_out = F.interpolate(intermediate_output[2], scale_factor=0.5)
+                        p6_out = F.interpolate(intermediate_output[2], scale_factor=0.25)
 
-                        # [torch.cat([x[:, 1:, :] for x in intermediate_output], dim=-1)]
-                        rpn_feature_maps = p4_out
+                        rpn_feature_maps = [p2_out, p3_out, p4_out, p5_out, p6_out]#p4_out
                         # output = torch.cat([x[:, 0] for x in intermediate_output], dim=-1)  # bs, 64x64+1, 384
                 elif RES18:
                     #np.where(rpn_feature_maps[0][0][0][2].cpu().detach().numpy()!=0)
                     self.fpn.eval()
                     # # bs, 512,32,32 if fpn is resnet18
-                    # rpn_feature_maps = [self.fpn(images)]
+                    rpn_feature_maps = [self.fpn(images)]
 
                     # vgg16 bs,128,64,64
-                    rpn_feature_maps = [rearrange(self.fpn(images), 'b (c e m) d f -> b m (d c) (f e)', m=128,c=2,e=2)]
+                    # rpn_feature_maps = [rearrange(self.fpn(images), 'b (c e m) d f -> b m (d c) (f e)', m=128,c=2,e=2)]
                 else:
                     # Feature extraction
                     # bs,256: 256,256 -> 128,128 -> 64,64 -> 32,32 -> 16,16
@@ -2143,45 +2144,47 @@ class MaskRCNN(nn.Module):
                                 mrcnn_mask = mrcnn_mask.cuda()
                         else: #prrob roi tjs: tensor([[0., 0., 1., 1.], [1., 0., 1., 0.], [1., 0., 1., 0.]], device='cuda:0', grad_fn=<CatBackward0>)
                             # check prediction masks
-                            # fig = plt.figure(figsize=(20, 10))
                             # nb_gt_ms = gt_masks.shape[1]
+                            # nb_pred = target_class_ids.shape[0]
+                            # nb_nonzero = np.sum(target_class_ids.cpu().detach().numpy() > 0)
+                            # fig, axs = plt.subplots(int((nb_gt_ms + nb_nonzero) / 5) + 1, 5, figsize=(10, 20))
                             # gt_ms = gt_masks.cpu().detach().numpy()[0]
                             # gt_ids = gt_class_ids.cpu().detach().numpy()[0]
+                            # half = int(gt_boxes.shape[0] / 2)
                             # gt_b = gt_boxes.cpu().detach().numpy()[0] * 1024
                             # for idx, nb_gt_m in enumerate(range(nb_gt_ms)):
-                            #     ax = fig.add_subplot(idx // 5 + 1, 5, idx + 1)
+                            #     axs[idx // 5, idx % 5].imshow(
+                            #         rearrange(norm_image(images[i].cpu().detach().numpy()), 'c b p -> b p c', c=3))
                             #     # ax.imshow(gt_ms[idx])
-                            #     ax.imshow(rearrange(images[i].cpu().detach().numpy(), 'c b p -> b p c', c=3))
                             #     rect = patches.Rectangle((gt_b[idx][1], gt_b[idx][0]), gt_b[idx][3] - gt_b[idx][1],
                             #                              gt_b[idx][2] - gt_b[idx][0], linewidth=2, edgecolor='r',
                             #                              facecolor='none')
                             #     rx, ry = rect.get_xy()
-                            #     plt.text(rx, ry + 30, cats[gt_ids[idx]], fontsize=13, color='r', weight='bold')
-                            #     ax.add_patch(rect)
-                            # nb_pred = target_class_ids.shape[0]
-                            # nb_nonzero = np.sum(target_class_ids.cpu().detach().numpy() > 0)
+                            #     axs[idx // 5, idx % 5].add_patch(rect)
+                            #     axs[idx // 5, idx % 5].title.set_text(cats[gt_ids[idx]])
                             # pred_ms = target_mask.cpu().detach().numpy()
                             # pred_ids = target_class_ids.cpu().detach().numpy()
                             # pred_bs = rois.cpu().detach().numpy() * 1024
+                            # k = idx + 1
                             # for idx, pr in enumerate(range(nb_nonzero)):
-                            #     ax = fig.add_subplot(idx // 5 + 1 + 5, 5, idx + 1)
-                            #     ax.imshow(pred_ms[idx])
+                            #     axs[(idx + k) // 5, (idx + k) % 5].imshow(pred_ms[idx])
                             #     # ax.imshow(np.zeros((1024,1024)))
                             #     pred_b = pred_bs[idx]
                             #     rect = patches.Rectangle((pred_b[1], pred_b[0]), pred_b[3] - pred_b[1],
                             #                              pred_b[2] - pred_b[0], linewidth=2, edgecolor='r',
                             #                              facecolor='none')
-                            #     ax.add_patch(rect)
-                            #     ax.title.set_text(
-                            #         f"{cats[pred_ids[idx]]} with {nb_pred - nb_nonzero} zero preds")
-                            # fig.tight_layout(pad=3)
+                            #     axs[(idx + k) // 5, (idx + k) % 5].add_patch(rect)
+                            #     axs[(idx + k) // 5, (idx + k) % 5].title.set_text(
+                            #         f"{cats[pred_ids[idx]]}&{nb_pred - nb_nonzero}")
+                            # plt.tight_layout(pad=2)
                             # plt.show()
 
                             # Network Heads
                             # Proposal classifier and BBox regressor heads
                             # print("2", rois.size()[0])
 
-                            if VITS or RES18:
+                            # if VITS or RES18:
+                            if RES18:
                                 mrcnn_feature_maps = [rpn_feature_maps[0][i].unsqueeze(0)]
                             else:
                                 mrcnn_feature_maps = [p2_out[i].unsqueeze(0),p3_out[i].unsqueeze(0),p4_out[i].unsqueeze(0),p5_out[i].unsqueeze(0)]
@@ -2205,14 +2208,14 @@ class MaskRCNN(nn.Module):
                             preds = list(set([np.argmax(v) for v in mrcnn_class.cpu().detach().numpy()]))
                             if preds:
                                 a = f"pred: {preds}   rpn:{list(set(target_class_ids.cpu().numpy()))}   gt:{list(set(gt_class_ids.cpu().numpy()[0]))}"
-                                print("---")
-                                print("pre raw",pre)
-                                print(a) #TODO
-                                # with open('./logs/mrcnn_log.txt', 'a') as f:
-                                #     f.write(f"---\npre raw:{pre}\n")
-                                #     f.write(f"{a}\n")
-                                #     if np.where(mrcnn_mask.cpu().detach().numpy() > 0):
-                                #         f.write("mrcnn_mask: not all zero\n")
+                                # print("---")
+                                # print("pre raw",pre)
+                                # print(a)
+                                with open('./logs/mrcnn_log.txt', 'a') as f:
+                                    f.write(f"---\npre raw:{pre}\n")
+                                    f.write(f"{a}\n")
+                                    if np.where(mrcnn_mask.cpu().detach().numpy() > 0):
+                                        f.write("mrcnn_mask: not all zero\n")
                         # Compute losses
                         rpn_class_loss, rpn_bbox_loss, mrcnn_class_loss, mrcnn_bbox_loss, mrcnn_mask_loss = \
                             compute_losses(rpn_match, rpn_bbox, rpn_class_logits, rpn_pred_bbox, target_class_ids,
@@ -2237,7 +2240,7 @@ class MaskRCNN(nn.Module):
                 if step%steps==0:
                     avg_loss = epoch_loss / step
                     s = "===> Epoch[{}]({}/{}): Avg Loss so far: {:.4f}".format(epoch, step, nb_batches, avg_loss)
-                    print(s) #TODO
+                    print(s)
                     with open('./logs/mrcnn_log.txt', 'a') as f:
                         f.write(s + "\n")
                     # log_dict = dict()
@@ -2276,7 +2279,8 @@ class MaskRCNN(nn.Module):
 
             self.apply(set_bn_eval)
 
-        if VITS or RES18:
+        # if VITS or RES18:
+        if RES18:
             rpn_feature_maps = [self.fpn(molded_images)]
             mrcnn_feature_maps = [rpn_feature_maps[0]]
         else:
