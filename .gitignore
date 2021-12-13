@@ -14,3 +14,11 @@ output/*
 det.py
 runs/*
 newP.py
+coco_eval.py
+coco_utils.py
+engine.py
+utils_vision.py
+CocoDataset.py
+*.ipynb
+tv-training-code.py
+torch_out/

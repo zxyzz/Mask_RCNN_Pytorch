@@ -587,7 +587,7 @@ if __name__ == '__main__':
 
         #laa
         dataset_train = CocoDataset()
-        coco = dataset_train.load_coco(args.dataset, 'val', year=2017, auto_download=False,
+        coco = dataset_train.load_coco(args.dataset, 'train', year=2017, auto_download=False,
                                        class_ids=None, class_map=None, return_coco=True)
         # dataset_train.load_coco(args.dataset, "valminusminival", year=args.year, auto_download=args.download)
         dataset_train.prepare()

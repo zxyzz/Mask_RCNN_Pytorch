@@ -48,11 +48,11 @@ cats = ['BG','person','bicycle','car','motorcycle','airplane','bus','train','tru
         'potted plant','bed','dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone','microwave','oven','toaster','sink',
         'refrigerator','book','clock','vase','scissors','teddy bear','hair drier','toothbrush']
 
-# RES18 = False
-# VITS = True
+RES18 = False
+VITS = True
 
-RES18 = True
-VITS = False
+# RES18 = True
+# VITS = False
 
 # RES18 = False
 # VITS = False
@@ -1645,7 +1645,6 @@ class MaskRCNN(nn.Module):
             #                                                                       config.RPN_ANCHOR_STRIDE)).float(), requires_grad=False)
 
         elif VITS:
-            #todo ANCHOR
             self.fpn = vits.__dict__['vit_small'](patch_size=16, num_classes=0)
             print("Loading dino_deitsmall16_pretrain.pth")
             self.fpn.load_state_dict(torch.load('./data/dino_deitsmall16_pretrain.pth'))
@@ -1917,14 +1916,14 @@ class MaskRCNN(nn.Module):
         # Pre-defined layer regular expressions
         layer_regex = {
             # all layers but the backbone
-            "heads": r"(fpn.P5\_.*)|(fpn.P4\_.*)|(fpn.P3\_.*)|(fpn.P2\_.*)|(rpn.*)|(classifier.*)|(mask.*)",
+            "heads": r"(fpn.*)|(rpn.*)|(classifier.*)|(mask.*)",
             # From a specific Resnet stage and up
             "3+": r"(fpn.C3.*)|(fpn.C4.*)|(fpn.C5.*)|(fpn.P5\_.*)|(fpn.P4\_.*)|(fpn.P3\_.*)|(fpn.P2\_.*)|(rpn.*)|(classifier.*)|(mask.*)",
             "4+": r"(fpn.C4.*)|(fpn.C5.*)|(fpn.P5\_.*)|(fpn.P4\_.*)|(fpn.P3\_.*)|(fpn.P2\_.*)|(rpn.*)|(classifier.*)|(mask.*)",
             "5+": r"(fpn.C5.*)|(fpn.P5\_.*)|(fpn.P4\_.*)|(fpn.P3\_.*)|(fpn.P2\_.*)|(rpn.*)|(classifier.*)|(mask.*)",
             # All layers
             "all": ".*",
-        }
+        } # "heads": r"(fpn.P5\_.*)|(fpn.P4\_.*)|(fpn.P3\_.*)|(fpn.P2\_.*)|(rpn.*)|(classifier.*)|(mask.*)",
         if layers in layer_regex.keys():
             layers = layer_regex[layers]
 
@@ -1938,13 +1937,14 @@ class MaskRCNN(nn.Module):
             train_generator = torch.utils.data.DataLoader(train_set, batch_size=BatchSize,
                                                           collate_fn=self.collate_custom, shuffle=True, num_workers=0)
         nb_batches = int(len(train_generator))
-        print("Number of Batches:", nb_batches)
+        print("Number of batches:", nb_batches)
+        print("Number of images:", nb_batches*BatchSize)
 
         # Train
         log("\nStarting at epoch {}. LR={}\n".format(self.epoch, learning_rate))
         log("Checkpoint Path: {}".format(self.checkpoint_path))
         self.set_trainable(layers)
-        
+
         # training mode
         self.train()
         # Set batchnorm always in eval mode during training
@@ -1968,7 +1968,7 @@ class MaskRCNN(nn.Module):
         # sum(p.numel() for p in self.fpn.parameters() if p.requires_grad) # 3'344'384
         # sum(p.numel() for p in self.classifier.parameters() if p.requires_grad) # 14'310'805
         # sum(p.numel() for p in self.mask.parameters() if p.requires_grad) # 2'643'537
-
+        # [p.requires_grad for n,p in self.classifier.named_parameters()]
 
         # Training
         #laa
@@ -2027,9 +2027,12 @@ class MaskRCNN(nn.Module):
                         # depth384, p2_out:n3, p3_out:n2, p4_out:n1, p5_out:n1+conv kernel2, p6_out:n1+conv kernel4
                         p2_out = F.interpolate(intermediate_output[0], scale_factor=4)
                         p3_out = F.interpolate(intermediate_output[1], scale_factor=2)
-                        p4_out = intermediate_output[3]
-                        p5_out = F.interpolate(intermediate_output[2], scale_factor=0.5)
-                        p6_out = F.interpolate(intermediate_output[2], scale_factor=0.25)
+                        # p4_out = intermediate_output[3]
+                        # p5_out = F.interpolate(intermediate_output[2], scale_factor=0.5)
+                        # p6_out = F.interpolate(intermediate_output[2], scale_factor=0.25)
+                        p4_out = intermediate_output[2]
+			 p5_out = F.interpolate(intermediate_output[3], scale_factor=0.5)
+			 p6_out = F.interpolate(intermediate_output[3], scale_factor=0.25)
 
                         rpn_feature_maps = [p2_out, p3_out, p4_out, p5_out, p6_out]#p4_out
                         # output = torch.cat([x[:, 0] for x in intermediate_output], dim=-1)  # bs, 64x64+1, 384
@@ -2203,19 +2206,19 @@ class MaskRCNN(nn.Module):
                             # obs = [p[0] for p in preds if len(p[0]) != 0]
                             # if obs:
                             #     print(obs)
-                            max_ = mrcnn_class.cpu().detach().numpy().max(axis=1)
-                            pre = [np.where(val == max_[idx])[0] for idx, val in enumerate(mrcnn_class.cpu().detach().numpy())]
-                            preds = list(set([np.argmax(v) for v in mrcnn_class.cpu().detach().numpy()]))
-                            if preds:
-                                a = f"pred: {preds}   rpn:{list(set(target_class_ids.cpu().numpy()))}   gt:{list(set(gt_class_ids.cpu().numpy()[0]))}"
-                                # print("---")
-                                # print("pre raw",pre)
-                                # print(a)
-                                with open('./logs/mrcnn_log.txt', 'a') as f:
-                                    f.write(f"---\npre raw:{pre}\n")
-                                    f.write(f"{a}\n")
-                                    if np.where(mrcnn_mask.cpu().detach().numpy() > 0):
-                                        f.write("mrcnn_mask: not all zero\n")
+                            # max_ = mrcnn_class.cpu().detach().numpy().max(axis=1)
+                            # pre = [np.where(val == max_[idx])[0] for idx, val in enumerate(mrcnn_class.cpu().detach().numpy())]
+                            # preds = list(set([np.argmax(v) for v in mrcnn_class.cpu().detach().numpy()]))
+                            # if preds:
+                            #     a = f"pred: {preds}   rpn:{list(set(target_class_ids.cpu().numpy()))}   gt:{list(set(gt_class_ids.cpu().numpy()[0]))}"
+                            #     # print("---")
+                            #     # print("pre raw",pre)
+                            #     # print(a)
+                            #     with open('./logs/mrcnn_log.txt', 'a') as f:
+                            #         f.write(f"---\npre raw:{pre}\n")
+                            #         f.write(f"{a}\n")
+                            #         if np.where(mrcnn_mask.cpu().detach().numpy() > 0):
+                            #             f.write("mrcnn_mask: not all zero\n")
                         # Compute losses
                         rpn_class_loss, rpn_bbox_loss, mrcnn_class_loss, mrcnn_bbox_loss, mrcnn_mask_loss = \
                             compute_losses(rpn_match, rpn_bbox, rpn_class_logits, rpn_pred_bbox, target_class_ids,
@@ -2240,7 +2243,7 @@ class MaskRCNN(nn.Module):
                 if step%steps==0:
                     avg_loss = epoch_loss / step
                     s = "===> Epoch[{}]({}/{}): Avg Loss so far: {:.4f}".format(epoch, step, nb_batches, avg_loss)
-                    print(s)
+                    # print(s)
                     with open('./logs/mrcnn_log.txt', 'a') as f:
                         f.write(s + "\n")
                     # log_dict = dict()
